@@ -1,0 +1,108 @@
+{
+  "UE4SS/src/GUI/LuaDebugger.cpp": {
+    "reason": "GUI debug hook and queued debugger-control lambdas inspect/evaluate with raw Lua API, not temporary Lua wrappers or checked LMS methods. Control events have their own host VM scope.",
+    "sites": [
+      "lua_sethook(L, debug_hook, LUA_MASKLINE | LUA_MASKCALL | LUA_MASKRET, 0);",
+      "lua_sethook(L, nullptr, 0, 0);",
+      "UE4SSProgram::get_program().queue_lua_control_event(*control, L, [code](lua_State* L) {",
+      "UE4SSProgram::get_program().queue_lua_control_event(info, state, [](lua_State* current) {",
+      "UE4SSProgram::get_program().queue_lua_control_event(*control, L, [expanded=std::move(expanded)](lua_State* L) {",
+      "UE4SSProgram::get_program().queue_lua_control_event(*control, L, [](lua_State* L) {",
+      "if (control) UE4SSProgram::get_program().queue_lua_control_event(*control, state, [debug_enabled](lua_State* current) {"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaCallbackFrame.c": {
+    "reason": "Token __gc erases callback metadata. uikit_lua_callback_entry enters protected HostApiRuntime Native dispatch; internal publication uses lua_pcall.",
+    "sites": [
+      "lua_pushcfunction(L,collected);lua_setfield(L,-2,\"__gc\");",
+      "lua_pushcclosure(L,uikit_lua_callback_entry,(int)r->upvalues+2);",
+      "lua_pushcfunction(L,push);lua_pushlightuserdata(L,r);status=lua_pcall(L,1,1,0);"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaObjectAuthorityRuntime.cpp": {
+    "reason": "Host userdata observer callbacks update authority metadata/destructor receipts only; not Lua-callable SDK bindings and no checked LMS access.",
+    "sites": [
+      "[](lua_State* s,void* p,const void* t) noexcept {if(auto* r=runtime.load(std::memory_order_acquire))r->destroying(s,p,t);},",
+      "[](lua_State* s,const void* t,int (*f)(lua_State*)) noexcept {if(auto* r=runtime.load(std::memory_order_acquire))r->finalizer(s,t,f);}"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaObjectFrame.c": {
+    "reason": "Normal object pair closures target LMS dispatch. RAW_FUNCTION pairs are authenticated userdata destructors; metamethods_destructor destroys C++ MetaMethods only. Internal raw operations use lua_pcall.",
+    "sites": [
+      "lua_pushcclosure(L,pair->function,2);",
+      "} else if(pair->kind==UIKIT_OBJECT_PAIR_RAW_FUNCTION)lua_pushcfunction(L,pair->function);",
+      "lua_pushliteral(L,\"__gc\");lua_pushcfunction(L,r->metamethods_destructor);lua_rawset(L,-3);",
+      "lua_pushcfunction(L,perform);lua_pushlightuserdata(L,r);"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaOwnedUserdataFrame.c": {
+    "reason": "Owned __gc validates/takes destructor receipt then destroys storage, without checked LMS operations.",
+    "sites": [
+      "lua_pushcfunction(L,uikit_owned_userdata_gc);lua_setfield(L,-2,\"__gc\");"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaReferenceFrame.c": {
+    "reason": "Internal protected raw registry-reference helper; no ordinary SDK callback.",
+    "sites": [
+      "lua_pushcfunction(L, perform);"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaThreadFrame.c": {
+    "reason": "Internal protected raw thread creation helper; no ordinary SDK callback.",
+    "sites": [
+      "lua_pushcfunction(L, perform);"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaTokenFrame.c": {
+    "reason": "Token __gc removes host token metadata only; internal raw helper uses lua_pcall.",
+    "sites": [
+      "lua_pushcclosure(L, token_gc, 2); lua_setfield(L, -2, \"__gc\");",
+      "lua_pushcfunction(L, perform); lua_pushlightuserdata(L, r);"
+    ]
+  },
+  "UE4SS/src/LuaHost/LuaValueFrame.c": {
+    "reason": "Internal protected raw value operation helper; no ordinary SDK callback.",
+    "sites": [
+      "lua_pushcfunction(L, perform);       /* zero-upvalue C function: no allocation */"
+    ]
+  },
+  "UE4SS/src/Mod/LuaMod.cpp": {
+    "reason": "custom_module_searcher uses raw Lua only. Raw directory __index exists ONLY in UE4SS_LUA_DIRECTORY_BASELINE. Production uses const Lua& Table.add_pair with a table receiver.",
+    "sites": [
+      "lua_pushcclosure(L, custom_module_searcher, 1);",
+      "const auto directory_index = +[](lua_State* lua_state) -> int {",
+      "lua_pushcfunction(lua.get_lua_state(), directory_index);"
+    ]
+  },
+  "deps/first/LuaMadeSimple/include/LuaMadeSimple/LuaMadeSimple.hpp": {
+    "reason": "automatic userdata finalizer and shared_ptr __gc perform raw userdata notification/destruction only, with no checked LMS operations.",
+    "sites": [
+      "return [](lua_State* lua_state) -> int {",
+      "metatable.add_pair(\"__gc\", [](lua_State* lua_state) -> int {"
+    ]
+  },
+  "deps/first/LuaMadeSimple/src/HostExecutionFrame.c": {
+    "reason": "Internal protected thread creation/adoption helpers use raw Lua, not exposed SDK bodies.",
+    "sites": [
+      "lua_pushcfunction(L, create_thread);",
+      "lua_pushcfunction(L,anchor_current_thread);"
+    ]
+  },
+  "deps/first/LuaMadeSimple/src/HostFunctionFrame.c": {
+    "reason": "Normal closures target process_lua_function/process_cpp_function. verified_host publishes authenticated host destructors only; internal publication uses raw Lua under lua_pcall.",
+    "sites": [
+      "lua_pushcclosure(L, r->trampoline, 2);",
+      "lua_pushcfunction(L, publish); lua_pushlightuserdata(L, (void*)r);",
+      "lua_pushcfunction(L, r->verified_host);",
+      "lua_pushcfunction(L, publish_internal); lua_pushlightuserdata(L, r);"
+    ]
+  },
+  "deps/first/LuaMadeSimple/src/LuaMadeSimple.cpp": {
+    "reason": "pcall_error_handler uses raw Lua and guarded auxiliary dispatch. Debug hook uses lms_managed_debug_hook and auxiliary receipt. Ordinary SDK bodies go through LMS dispatch.",
+    "sites": [
+      "lua_pushcfunction(L, pcall_error_handler);",
+      "lua_sethook(actual,ticket ? lms_managed_debug_hook : func,mask,count);",
+      "lua_pushcfunction(L, pcall_error_handler);"
+    ]
+  }
+}

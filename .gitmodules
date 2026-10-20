@@ -1,0 +1,3 @@
+[submodule "host/deps/first/patternsleuth"]
+	path = host/deps/first/patternsleuth
+	url = https://github.com/trumank/patternsleuth.git

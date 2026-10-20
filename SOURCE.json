@@ -1,0 +1,15 @@
+{
+  "package_versions": {
+    "Core": "2.4.3",
+    "UIKit": "2.3.6",
+    "WitchItRuntime": "3.1.0"
+  },
+  "release_zip": {
+    "bytes": 9983632,
+    "name": "core-2.4.3.zip",
+    "sha256": "d207cf03824d89a004244fcf33c724771b821108c79119db38237b7582a3695b"
+  },
+  "repository": "monroth/WitchItPlus-Core",
+  "source_commit": "c58a810d239cafc115c82646d7f153ad5bf94076",
+  "updater_production_ready": false
+}

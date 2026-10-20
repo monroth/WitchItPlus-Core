@@ -1,0 +1,207 @@
+cmake_minimum_required(VERSION 3.22)
+project(UE4SS)
+
+message("Configuring UE4SS")
+
+# Add proxy generator subproject
+add_subdirectory("proxy_generator")
+
+# Release settings
+option(UE4SS_LIB_BETA_IS_STARTED "Have beta releases started for the current major version" ON)
+option(UE4SS_LIB_IS_BETA "Is this a beta release" ON)
+
+# Define generated directories
+set(UE4SS_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated_include")
+set(UE4SS_GENERATED_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated_src")
+
+# ---------------------------------------------------------------------------
+# Version Information
+# ---------------------------------------------------------------------------
+
+# Read version from file
+file(READ ${UE4SS_GENERATED_SOURCE_DIR}/version.cache UE4SS_LIB_VERSION)
+string(REGEX MATCHALL "([0-9]+).([0-9]+).([0-9]+).([0-9]+).([0-9]+)" VERSION_PARTS "${UE4SS_LIB_VERSION}")
+set(UE4SS_LIB_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(UE4SS_LIB_VERSION_MINOR ${CMAKE_MATCH_2})
+set(UE4SS_LIB_VERSION_HOTFIX ${CMAKE_MATCH_3})
+set(UE4SS_LIB_VERSION_PRERELEASE ${CMAKE_MATCH_4})  # Publicly available pre-release
+set(UE4SS_LIB_VERSION_BETA ${CMAKE_MATCH_5})  # Pre-pre-release version
+
+# Get Git SHA
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        RESULT_VARIABLE GIT_RESULT
+        OUTPUT_VARIABLE UE4SS_LIB_BUILD_GITSHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT GIT_RESULT EQUAL 0)
+        set(UE4SS_LIB_BUILD_GITSHA "unknown")
+    endif()
+else()
+    set(UE4SS_LIB_BUILD_GITSHA "no-git")
+endif()
+
+message("UE4SS Version: ${UE4SS_LIB_VERSION_MAJOR}.${UE4SS_LIB_VERSION_MINOR}.${UE4SS_LIB_VERSION_HOTFIX}.${UE4SS_LIB_VERSION_PRERELEASE}.${UE4SS_LIB_VERSION_BETA} (${UE4SS_LIB_BUILD_GITSHA})")
+
+# ---------------------------------------------------------------------------
+# Target Configuration
+# ---------------------------------------------------------------------------
+
+# Find source files
+file(GLOB_RECURSE UE4SS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/**.cpp")
+list(APPEND UE4SS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaValueFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaEntryFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaReferenceFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaCallbackFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaTokenFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaObjectFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaThreadFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaNativeFrame.c" "${CMAKE_CURRENT_SOURCE_DIR}/src/LuaHost/LuaOwnedUserdataFrame.c")
+file(GLOB_RECURSE UE4SS_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/**.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/**.h")
+
+# Create the main library
+add_library(UE4SS SHARED ${UE4SS_SOURCES})
+
+# Set C++23 standard 
+target_compile_features(UE4SS PUBLIC cxx_std_23)
+
+# Compile the UE4SS SDK generator backend in from the same JSON that ships in assets/, so the
+# generator is usable without any files on disk and the built-in can never drift from the shipped one.
+set(UE4SS_SDK_BACKEND_JSON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../assets/UE4SS_SDK_Backends/UE4SS.json")
+file(READ "${UE4SS_SDK_BACKEND_JSON_PATH}" UE4SS_SDK_BACKEND_JSON)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/SDKGenerator/BuiltinSDKBackend.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/SDKGenerator/BuiltinSDKBackend.hpp"
+    @ONLY
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${UE4SS_SDK_BACKEND_JSON_PATH}")
+
+# Add include directories
+target_include_directories(UE4SS PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/generated_include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
+)
+
+# Add version definitions with PUBLIC visibility so external consumers get them
+target_compile_definitions(UE4SS PUBLIC
+    UE4SS_LIB_VERSION_MAJOR=${UE4SS_LIB_VERSION_MAJOR}
+    UE4SS_LIB_VERSION_MINOR=${UE4SS_LIB_VERSION_MINOR}
+    UE4SS_LIB_VERSION_HOTFIX=${UE4SS_LIB_VERSION_HOTFIX}
+    UE4SS_LIB_VERSION_PRERELEASE=${UE4SS_LIB_VERSION_PRERELEASE}
+    UE4SS_LIB_VERSION_BETA=${UE4SS_LIB_VERSION_BETA}
+    UE4SS_LIB_BETA_STARTED=$<BOOL:${UE4SS_LIB_BETA_IS_STARTED}>
+    UE4SS_LIB_IS_BETA=$<BOOL:${UE4SS_LIB_IS_BETA}>
+    UE4SS_LIB_BUILD_GITSHA="${UE4SS_LIB_BUILD_GITSHA}"
+    UE4SS_CONFIGURATION="$<CONFIG>"
+)
+
+# Add headers as sources for IDE integration
+target_sources(UE4SS PUBLIC
+    FILE_SET ue4ss_headers TYPE HEADERS
+    BASE_DIRS include
+    FILES ${UE4SS_HEADERS}
+)
+
+# Organize in IDE
+source_group(TREE "${CMAKE_CURRENT_LIST_DIR}" FILES ${UE4SS_SOURCES} ${UE4SS_HEADERS})
+
+# Add natvis file for Visual Studio debugging (works with MSVC and clang-cl)
+if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    target_sources(UE4SS PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../UE4SS.natvis>
+    )
+endif()
+
+# First party static build definitions
+target_compile_definitions(UE4SS PRIVATE
+    RC_UE4SS_EXPORTS
+    RC_ASM_HELPER_BUILD_STATIC
+    RC_FILE_BUILD_STATIC
+    RC_DYNAMIC_OUTPUT_BUILD_STATIC
+    RC_SINGLE_PASS_SIG_SCANNER_BUILD_STATIC
+    RC_SINGLE_PASS_SIG_SCANNER_STATIC
+    RC_UNREAL_BUILD_STATIC
+    RC_INPUT_BUILD_STATIC
+    RC_LUA_MADE_SIMPLE_BUILD_STATIC
+    RC_FUNCTION_TIMER_BUILD_STATIC
+    RC_PARSER_BASE_BUILD_STATIC
+    RC_INI_PARSER_BUILD_STATIC
+    RC_JSON_BUILD_STATIC
+    RC_JSON_PARSER_BUILD_STATIC
+    RC_LUA_WRAPPER_GENERATOR_BUILD_STATIC
+    RC_HELPERS_BUILD_STATIC
+)
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+# Link first-party dependencies
+target_link_libraries(UE4SS PUBLIC
+    File glaze::glaze DynamicOutput
+    Unreal SinglePassSigScanner LuaMadeSimple
+    Function IniParser JSON
+    Input Constructs Helpers
+    MProgram ScopedTimer Profiler
+    patternsleuth_bind
+)
+
+# Link third-party dependencies
+target_link_libraries(UE4SS PUBLIC
+    fmt ImGui PolyHook_2 
+    d3d11 glfw glad opengl32 
+    dbghelp psapi ws2_32 ntdll userenv
+)
+
+# ---------------------------------------------------------------------------
+# Output Configuration
+# ---------------------------------------------------------------------------
+
+# Enable link-time optimization
+set_property(TARGET UE4SS PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
+
+# Set runtime library to dynamic CRT (/MD, /MDd)
+# This matches Visual Studio's default, so external mods don't need to set it explicitly.
+set_property(TARGET UE4SS PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+# Set output name and standard
+set_target_properties(UE4SS PROPERTIES 
+    OUTPUT_NAME "UE4SS"
+    CXX_STANDARD 23
+)
+
+# Use the organize_targets function from IDEOrganization.cmake
+# The organize_special_targets function will also handle this target
+organize_targets("^UE4SS$" "RE-UE4SS")
+
+# A real linked-DLL lifecycle gate; engine operations alone are replaced.
+option(UE4SS_BUILD_LUA_LIFECYCLE_GATE "Build the no-engine LuaMod lifecycle gate" ON)
+option(UE4SS_LUA_LIFECYCLE_BASELINE "Negative control: omit the host ingress adapter" OFF)
+option(UE4SS_LUA_DISPATCH_BASELINE "Negative control: restore review-3 dispatch failures" OFF)
+option(UE4SS_LUA_REVIEW4_BASELINE "Negative control: restore review-4 dispatch failures" OFF)
+option(UE4SS_LUA_REVIEW5_BASELINE "Negative control: restore review-5 dispatcher failures" OFF)
+option(UE4SS_LUA_DIRECTORY_BASELINE "Negative control: raw directory __index without actual-stack ingress" OFF)
+option(UE4SS_LUA_REVIEW6_BASELINE "Negative control: accept ProcessEvent without an identity producer" OFF)
+if(WIN32 AND UE4SS_BUILD_LUA_LIFECYCLE_GATE)
+    target_compile_definitions(UE4SS PRIVATE UE4SS_LUA_LIFECYCLE_GATE)
+    if(UE4SS_LUA_LIFECYCLE_BASELINE)
+        set_source_files_properties("src/Mod/LuaMod.cpp" PROPERTIES COMPILE_DEFINITIONS UE4SS_LUA_LIFECYCLE_BASELINE)
+    endif()
+    if(UE4SS_LUA_DISPATCH_BASELINE)
+        set_property(SOURCE "src/Mod/LuaMod.cpp" APPEND PROPERTY COMPILE_DEFINITIONS UE4SS_LUA_DISPATCH_BASELINE)
+    endif()
+    if(UE4SS_LUA_REVIEW4_BASELINE)
+        set_property(SOURCE "src/Mod/LuaMod.cpp" APPEND PROPERTY COMPILE_DEFINITIONS UE4SS_LUA_REVIEW4_BASELINE)
+    endif()
+    if(UE4SS_LUA_REVIEW5_BASELINE)
+        set_property(SOURCE "src/Mod/LuaMod.cpp" APPEND PROPERTY COMPILE_DEFINITIONS UE4SS_LUA_REVIEW5_BASELINE)
+    endif()
+    if(UE4SS_LUA_DIRECTORY_BASELINE)
+        set_property(SOURCE "src/Mod/LuaMod.cpp" APPEND PROPERTY COMPILE_DEFINITIONS UE4SS_LUA_DIRECTORY_BASELINE)
+    endif()
+    if(UE4SS_LUA_REVIEW6_BASELINE)
+        set_property(SOURCE "src/Mod/LuaMod.cpp" APPEND PROPERTY COMPILE_DEFINITIONS UE4SS_LUA_REVIEW6_BASELINE)
+    endif()
+    add_executable(UE4SSLuaLifecycleGate "../tests/LuaHost/ModLifecycleGateMain.cpp" "../tests/LuaHost/SerialAllocationGate.cpp")
+    target_link_libraries(UE4SSLuaLifecycleGate PRIVATE UE4SS)
+    set_target_properties(UE4SSLuaLifecycleGate PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:UE4SS>")
+endif()

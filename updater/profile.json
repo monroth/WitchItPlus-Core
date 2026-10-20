@@ -1,0 +1,117 @@
+{
+  "activation_adapter": null,
+  "activation_adapter_ready": false,
+  "approved_package_ids_sha": "c58a810d239cafc115c82646d7f153ad5bf94076",
+  "packages": {
+    "core": {
+      "base_url": "https://github.com/monroth/WitchItPlus-Core/releases/download",
+      "canonical_package_ids": [
+        "Core",
+        "UIKit",
+        "WitchItRuntime"
+      ],
+      "catalog_url": "https://github.com/monroth/WitchItPlus-Core/releases/latest/download/catalog.json",
+      "native_artifact_receipt": {
+        "files": {
+          "UE4SS.dll": {
+            "bytes": 21472768,
+            "sha256": "549697cb65a8e131ce6b2bcbbc2e91e6acb112767f86981159a3d18e8c3c6218"
+          },
+          "WitchItNativeProducer.dll": {
+            "bytes": 715264,
+            "sha256": "40d5a72e34641396e265162df4ae164a1b2c5dcb3e36778e582c901d35a875c7"
+          }
+        },
+        "source_commit": "c58a810d239cafc115c82646d7f153ad5bf94076"
+      },
+      "package_versions": {
+        "Core": "2.4.3",
+        "UIKit": "2.3.6",
+        "WitchItRuntime": "3.1.0"
+      },
+      "repository": "monroth/WitchItPlus-Core",
+      "repository_name": "WitchItPlus-Core",
+      "roots": [
+        "ue4ss/Mods/Core",
+        "ue4ss/Mods/UIKit",
+        "ue4ss/Mods/WitchItRuntime",
+        "dwmapi.dll",
+        "ue4ss/UE4SS.dll",
+        "ue4ss/LICENSE",
+        "ue4ss/UE4SS-settings.ini",
+        "ue4ss/Mods/mods.txt",
+        "ue4ss/Mods/mods.json",
+        "ue4ss/Mods/WitchItNativeProducer",
+        "ue4ss/Mods/Keybinds",
+        "ue4ss/Mods/shared",
+        "ue4ss/UE4SS_SDK_Backends",
+        "ue4ss/Mods/CheatManagerEnablerMod",
+        "ue4ss/Mods/ConsoleCommandsMod",
+        "ue4ss/Mods/ConsoleEnablerMod",
+        "ue4ss/Mods/SplitScreenMod",
+        "ue4ss/Mods/LineTraceMod",
+        "ue4ss/Mods/BPML_GenericFunctions",
+        "ue4ss/Mods/BPModLoaderMod"
+      ],
+      "version_anchor": "Core"
+    },
+    "editor-tweaks": {
+      "base_url": "https://github.com/monroth/WitchItPlus-EditorTweaks/releases/download",
+      "canonical_package_ids": [
+        "BaseWorldPlus"
+      ],
+      "catalog_url": "https://github.com/monroth/WitchItPlus-EditorTweaks/releases/latest/download/catalog.json",
+      "native_artifact_receipt": null,
+      "package_versions": {
+        "BaseWorldPlus": "3.1.0"
+      },
+      "repository": "monroth/WitchItPlus-EditorTweaks",
+      "repository_name": "WitchItPlus-EditorTweaks",
+      "roots": [
+        "ue4ss/Mods/BaseWorldPlus"
+      ],
+      "version_anchor": "BaseWorldPlus"
+    },
+    "fillapot-plus": {
+      "base_url": "https://github.com/monroth/WitchItPlus-FaPplus/releases/download",
+      "canonical_package_ids": [
+        "FillAPotPlus"
+      ],
+      "catalog_url": "https://github.com/monroth/WitchItPlus-FaPplus/releases/latest/download/catalog.json",
+      "native_artifact_receipt": null,
+      "package_versions": {
+        "FillAPotPlus": "3.2.0"
+      },
+      "repository": "monroth/WitchItPlus-FaPplus",
+      "repository_name": "WitchItPlus-FaPplus",
+      "roots": [
+        "ue4ss/Mods/FillAPotPlus"
+      ],
+      "version_anchor": "FillAPotPlus"
+    },
+    "matchrules-plus": {
+      "base_url": "https://github.com/monroth/WitchItPlus-MatchRulesPP/releases/download",
+      "canonical_package_ids": [
+        "MatchRulesPlusPlus"
+      ],
+      "catalog_url": "https://github.com/monroth/WitchItPlus-MatchRulesPP/releases/latest/download/catalog.json",
+      "native_artifact_receipt": null,
+      "package_versions": {
+        "MatchRulesPlusPlus": "4.1.6"
+      },
+      "repository": "monroth/WitchItPlus-MatchRulesPP",
+      "repository_name": "WitchItPlus-MatchRulesPP",
+      "roots": [
+        "ue4ss/Mods/MatchRulesPlusPlus"
+      ],
+      "version_anchor": "MatchRulesPlusPlus"
+    }
+  },
+  "runtime_abi": "witchit-c58a810d239cafc115c82646d7f153ad5bf94076",
+  "schema": 1,
+  "test_only": false,
+  "trust": {
+    "contract_path": "verifier-contract.json",
+    "public_key": "RWREY0y19Re05jPOpntGcFh6GYCWAuyXtairJE8Y/9tn/xwqpidQs+YO"
+  }
+}

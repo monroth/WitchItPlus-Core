@@ -1,0 +1,13 @@
+{
+  "files": {
+    "UE4SS.dll": {
+      "bytes": 21472768,
+      "sha256": "549697cb65a8e131ce6b2bcbbc2e91e6acb112767f86981159a3d18e8c3c6218"
+    },
+    "WitchItNativeProducer.dll": {
+      "bytes": 715264,
+      "sha256": "40d5a72e34641396e265162df4ae164a1b2c5dcb3e36778e582c901d35a875c7"
+    }
+  },
+  "source_commit": "c58a810d239cafc115c82646d7f153ad5bf94076"
+}

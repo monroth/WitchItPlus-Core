@@ -1,0 +1,1 @@
+LICENSE covers the UE4SS host under host/. No separate license was found for WitchItNativeProducer, runtime packages or updater; no license is invented for them. Dependency licenses remain alongside their sources.

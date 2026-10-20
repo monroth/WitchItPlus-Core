@@ -1,0 +1,65 @@
+{
+  "package_ids_commit": "c58a810d239cafc115c82646d7f153ad5bf94076",
+  "private_repositories": [],
+  "public_roles": {
+    "core": {
+      "owner": "monroth",
+      "package_id": "Core",
+      "package_ids": [
+        "Core",
+        "UIKit",
+        "WitchItRuntime"
+      ],
+      "package_versions": {
+        "Core": "2.4.3",
+        "UIKit": "2.3.6",
+        "WitchItRuntime": "3.1.0"
+      },
+      "protocol_bundle_id": "core",
+      "repository_name": "WitchItPlus-Core",
+      "source_repository": "WitchItCore"
+    },
+    "editor-tweaks": {
+      "owner": "monroth",
+      "package_id": "BaseWorldPlus",
+      "package_ids": [
+        "BaseWorldPlus"
+      ],
+      "package_versions": {
+        "BaseWorldPlus": "3.1.0"
+      },
+      "protocol_bundle_id": "editor-tweaks",
+      "repository_name": "WitchItPlus-EditorTweaks",
+      "source_repository": "BaseWorldPlus"
+    },
+    "fillapot-plus": {
+      "owner": "monroth",
+      "package_id": "FillAPotPlus",
+      "package_ids": [
+        "FillAPotPlus"
+      ],
+      "package_versions": {
+        "FillAPotPlus": "3.2.0"
+      },
+      "protocol_bundle_id": "fillapot-plus",
+      "repository_name": "WitchItPlus-FaPplus",
+      "source_repository": "FillAPotPlus"
+    },
+    "matchrules-plus": {
+      "owner": "monroth",
+      "package_id": "MatchRulesPlusPlus",
+      "package_ids": [
+        "MatchRulesPlusPlus"
+      ],
+      "package_versions": {
+        "MatchRulesPlusPlus": "4.1.6"
+      },
+      "protocol_bundle_id": "matchrules-plus",
+      "repository_name": "WitchItPlus-MatchRulesPP",
+      "source_repository": "MatchRulesPlusPlus"
+    }
+  },
+  "schema": 1,
+  "source_fork": "monroth/RE-UE4SS-Witchit",
+  "source_fork_branch": "witchit"
+}
