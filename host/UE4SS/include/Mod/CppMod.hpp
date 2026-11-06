@@ -71,6 +71,8 @@ namespace RC
 
         auto fire_on_lua_stop(LuaMadeSimple::Lua& lua, LuaMadeSimple::Lua& main_lua, LuaMadeSimple::Lua& async_lua, LuaMadeSimple::Lua* hook_lua) -> void;
 
+        auto fire_on_lua_stop_drain(StringViewType mod_name) -> void;
+
         auto fire_unreal_init() -> void override;
         auto fire_ui_init() -> void override;
         auto fire_program_start() -> void override;

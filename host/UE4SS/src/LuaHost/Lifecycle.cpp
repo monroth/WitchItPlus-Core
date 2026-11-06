@@ -1,5 +1,6 @@
 #include <LuaHost/Lifecycle.hpp>
 #include <cassert>
+#include <atomic>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -35,6 +36,8 @@ struct Reference {
 };
 struct State {
     mutable std::mutex mutex;
+    std::atomic<void (*)()> wake{};
+    void notify() { if (auto fn=wake.load()) fn(); }
     HostState phase{HostState::running};
     std::uint64_t next_id{1};
     std::unordered_map<std::uint64_t, Vm> vms;
@@ -113,7 +116,9 @@ void release(std::shared_ptr<State> state, ContextHandle handle) noexcept {
         --module.callbacks;
     }
     state->entries.erase(found);
-    // Deliberately no callback, queue submission, teardown, gate or wait here.
+    if ((module.phase==ModuleState::retiring && !module.callbacks && !module.scopes) ||
+        (entry.is_scope && state->vms.at(entry.vm.id).phase==VmState::closing &&
+         !state->vms.at(entry.vm.id).scopes)) state->notify();
 }
 
 bool drained(const State& state) {
@@ -131,6 +136,8 @@ bool drained(const State& state) {
 }
 
 namespace RC::LuaHost {
+void Lifecycle::set_wake_callback(void (*fn)()) { state_->wake.store(fn); }
+
 VmExecutionLease::VmExecutionLease(std::shared_ptr<Detail::State> state, VmHandle vm)
     : state_(std::move(state)), vm_(vm), thread_(std::this_thread::get_id()) {}
 VmExecutionLease::VmExecutionLease(VmExecutionLease&& other) noexcept
@@ -152,7 +159,7 @@ void VmExecutionLease::reset() noexcept {
     const auto status = Detail::lookup(state->vms, vm_handle, vm);
     assert(status == Status::ok && vm->executions);
     if (status == Status::ok && vm->executions) --vm->executions;
-    // No Lua, gate acquisition, queue, wait or finalization from release.
+    if (vm->phase==VmState::closing && !vm->executions) state->notify();
 }
 
 CallbackLease::CallbackLease(std::shared_ptr<Detail::State> state,
@@ -447,7 +454,9 @@ Status Lifecycle::request_vm_close(VmHandle handle) {
     auto status = Detail::lookup(state_->vms, handle, vm);
     if (status != Status::ok) return status;
     if (vm->phase == VmState::closed) return Status::retired;
+    const bool changed=vm->phase!=VmState::closing;
     vm->phase = VmState::closing;
+    if (changed) state_->notify();
     return vm->scopes || vm->executions || vm->claimed ? Status::pending : Status::ready;
 }
 Status Lifecycle::request_module_retire(ModuleHandle handle) {
@@ -456,7 +465,9 @@ Status Lifecycle::request_module_retire(ModuleHandle handle) {
     auto status = Detail::lookup(state_->modules, handle, module);
     if (status != Status::ok) return status;
     if (module->phase == ModuleState::unloaded) return Status::retired;
+    const bool changed=module->phase!=ModuleState::retiring;
     module->phase = ModuleState::retiring;
+    if (changed) state_->notify();
     return module->callbacks || module->scopes || module->claimed ? Status::pending : Status::ready;
 }
 Status Lifecycle::claim_vm_finalization(VmHandle handle) {

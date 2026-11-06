@@ -120,6 +120,6 @@ static void round6_gates(UE4SSProgram& program,const std::filesystem::path& scra
     review4_tick_slots.front()->Invoke(); // genuine BP loader's real ExecuteInGameThread queue
     review4_check(!gate_scope_rejected,"ROUND6 FAIL genuine BPModLoader SDK admission");
     mod.uninstall();review4_check(mod.host_close_complete(),"ROUND6 FAIL BP loader close");
-    std::cout<<"ROUND6 PASS genuine BPModLoader main.lua and real WitchItRuntime discovery\n";
+    std::cout<<"ROUND6 PASS genuine BPModLoader main.lua and real WitchItRuntime atomic files and JSON arrays\n";
     review4_check(LuaHost::HostBindings::instance().vm_count()==0,"ROUND6 FAIL VM leak");
 }

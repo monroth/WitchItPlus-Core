@@ -211,6 +211,7 @@ int _tmain(int argc, TCHAR* argv[])
     cpp_file << "#include <Windows.h>" << endl;
     cpp_file << "#include <shellapi.h>" << endl;
     cpp_file << "#include <filesystem>" << endl;
+    cpp_file << "extern \"C\" int witchit_update_bootstrap(const wchar_t*);" << endl;
     cpp_file << endl;
     cpp_file << "#pragma comment(lib, \"user32.lib\")" << endl;
     cpp_file << "#pragma comment(lib, \"shell32.lib\")" << endl;
@@ -316,6 +317,7 @@ int _tmain(int argc, TCHAR* argv[])
     cpp_file << "    GetModuleFileNameW(moduleHandle, moduleFilenameBuffer, sizeof(moduleFilenameBuffer) / sizeof(wchar_t));" << endl;
     cpp_file << "    const auto currentPath = std::filesystem::path(moduleFilenameBuffer).parent_path();" << endl;
     cpp_file << "    const fs::path ue4ssPath = currentPath / \"ue4ss\" / \"UE4SS.dll\";" << endl;
+    cpp_file << "    if (witchit_update_bootstrap(currentPath.c_str()) != 0) { MessageBoxW(nullptr,L\"Could not restore the previous update. Restart the game.\",L\"Witch It+\",MB_OK|MB_ICONERROR); ExitProcess(1); }" << endl;
     cpp_file << endl;
 
     cpp_file << "    // Check for --ue4ss-path command line argument" << endl;

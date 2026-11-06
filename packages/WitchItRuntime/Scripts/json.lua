@@ -7,7 +7,7 @@ local function quote(s)
     return '"'..s:gsub('[%z\1-\31\\"]',function(c) return escapes[c] or string.format('\\u%04x',c:byte()) end)..'"'
 end
 function J.encode(v,limit)
-    limit=limit or 262144;assert(type(limit)=='number' and limit>0 and limit<=1100000,'JSON limit invalid')
+    limit=limit or 262144;assert(type(limit)=='number' and limit>0 and limit<=4194304,'JSON limit invalid')
     local seen={}
     local function enc(x,depth)
         assert(depth<48,'JSON too deep')
@@ -17,7 +17,8 @@ function J.encode(v,limit)
         if t=='number' then assert(x==x and math.abs(x)<math.huge,'nonfinite JSON'); return string.format('%.17g',x) end
         assert(t=='table','unsupported JSON value '..t)
         assert(not seen[x],'cyclic JSON'); seen[x]=true
-        local a,out=getmetatable(x)==arrayMT,{}
+        local mt=getmetatable(x)
+        local a,out=x[1]~=nil or type(mt)=="table" and mt.__json_array==true,{}
         if a then
             local length=#x; local entries=0
             for k in pairs(x) do
@@ -36,7 +37,7 @@ function J.encode(v,limit)
     local text=enc(v,0)..'\n'; assert(#text<=limit,'JSON size limit'); return text
 end
 function J.decode(s,limit)
-    limit=limit or 262144;assert(type(limit)=='number' and limit>0 and limit<=1100000,'JSON limit invalid')
+    limit=limit or 262144;assert(type(limit)=='number' and limit>0 and limit<=4194304,'JSON limit invalid')
     assert(type(s)=='string' and #s<=limit,'JSON size limit')
     local i,n=1,#s
     local function ws() local _,b=s:find('^[ \t\r\n]*',i); i=(b or i-1)+1 end

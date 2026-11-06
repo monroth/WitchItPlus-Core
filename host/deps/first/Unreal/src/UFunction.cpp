@@ -1,6 +1,7 @@
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 
 #include <utility>
+#include <Unreal/Internal/NativeHookRemoval.hpp>
 #include <type_traits>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -114,8 +115,8 @@ namespace RC::Unreal
 
     auto UFunction::UnregisterHook(CallbackId CallbackId) -> bool
     {
-        UnrealScriptFunctionData& FunctionData = GetFunctionHookData();
-        return FunctionData.RemoveCallback(CallbackId);
+        // Removal must never create hook data or touch a dying UFunction.
+        return Internal::RemoveFunctionHookCallback(Internal::GetHookedFunctionsMap(), this, CallbackId);
     }
 
     auto UFunction::UnregisterAllHooks() -> void

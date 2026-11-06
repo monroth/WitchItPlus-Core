@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -12,9 +13,19 @@ namespace RC::LuaHost {
 template<class T, class Id>
 class ModControlStore {
     mutable std::mutex mutex_;
+    std::function<void()> wake_;
+    std::shared_ptr<T> borrowed(Id id, std::shared_ptr<T> owner) const {
+        auto* pointer=owner.get();
+        return std::shared_ptr<T>(pointer, [this,id,owner=std::move(owner)](T*) mutable {
+            owner.reset();
+            std::lock_guard lock{mutex_};
+            if (retired_.contains(id) && wake_) wake_();
+        });
+    }
     std::map<Id, std::shared_ptr<T>> active_;
     std::map<Id, std::shared_ptr<T>> retired_;
 public:
+    void set_wake_callback(std::function<void()> wake) { wake_=std::move(wake); }
     void publish(Id id, std::shared_ptr<T> object) {
         if (!object) return;
         std::lock_guard lock{mutex_};
@@ -25,13 +36,13 @@ public:
     std::shared_ptr<T> borrow(Id id) const {
         std::lock_guard lock{mutex_};
         auto found = active_.find(id);
-        return found == active_.end() ? std::shared_ptr<T>{} : found->second;
+        return found == active_.end() ? std::shared_ptr<T>{} : borrowed(id, found->second);
     }
     std::vector<std::shared_ptr<T>> snapshot() const {
         std::vector<std::shared_ptr<T>> result;
         std::lock_guard lock{mutex_};
         result.reserve(active_.size());
-        for (const auto& [id, object] : active_) result.push_back(object);
+        for (const auto& [id, object] : active_) result.push_back(borrowed(id, object));
         return result;
     }
     Id id_of(const T* object) const {

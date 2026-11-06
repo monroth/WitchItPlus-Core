@@ -22,6 +22,7 @@ namespace RC
         ~CrashDumper();
 
       public:
+        static void phase(const char*) noexcept;
         void enable();
         void set_full_memory_dump(bool enabled);
     };

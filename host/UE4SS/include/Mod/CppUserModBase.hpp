@@ -45,6 +45,12 @@ namespace RC
         RC_UE4SS_API virtual ~CppUserModBase();
 
       public:
+        // Called after all Lua-stop scopes have returned. May drain native
+        // executors; must never access Lua or hold a container/VM gate.
+        RC_UE4SS_API virtual auto on_lua_stop_drain(StringViewType) -> void {}
+        // Called without the Lua gate. False retains the live object/DLL for a later cleanup event.
+        RC_UE4SS_API virtual auto prepare_uninstall() -> bool { return true; }
+
         RC_UE4SS_API virtual auto on_update() -> void
         {
         }

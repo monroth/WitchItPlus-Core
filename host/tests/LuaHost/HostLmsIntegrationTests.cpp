@@ -2,6 +2,7 @@
 #include <LuaHost/HostIntegration.hpp>
 #include <LuaHost/EngineCallbackBindings.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <LuaMadeSimple/LuaObject.hpp>
 #include <LuaMadeSimple/HostExecutionHooks.hpp>
 #include <Unreal/Hooks/Internal/CallbackOwnerBridge.hpp>
 #include <dlfcn.h>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <Input/Handler.hpp>
+#include "../../../../consumer/native/include/UIKitHostStack.hpp"
 // Observe real bundled gate calls through the linker's wrap facility. The
 // delegated originals are the actual pthread implementation in luauser.c.
 static thread_local int actual_gate_depth;
@@ -78,6 +80,60 @@ static int host_cross_child_sdk(const LuaMadeSimple::Lua& actual) {
     catch(const std::runtime_error& e){refused=std::strstr(e.what(),"protected actual VM")!=nullptr;}
     CHECK(refused);actual.set_integer(42);return 1;
 }
+static int host_read_string(const LuaMadeSimple::Lua& lua) {
+    const auto value=lua.get_string();
+    lua.set_string(value);
+    return 1;
+}
+static void test_string_arguments() {
+    auto& host=HostBindings::instance();
+    auto& lua=LuaMadeSimple::new_state();
+    auto* root=lua.get_lua_state();
+    const auto vm=host.attach_vm(root);CHECK(vm.status==Status::ok);
+    {
+        LuaMadeSimple::LuaExecutionScope execution{root,root};
+        luaL_openlibs(root);
+        lua.register_function("ReadString",host_read_string);
+        LuaMadeSimple::Lua::MetaMethods methods;
+        methods.create(LuaMadeSimple::Lua::MetaMethod::Index,[](const LuaMadeSimple::Lua& actual)->int {
+            // Same argument consumption as UObjectBase::prepare_to_handle,
+            // through the real LMS __index wrapper and nested host delegate.
+            (void)actual.get_userdata<int>();
+            return host_read_string(actual);
+        });
+        lua.prepare_new_table();
+        lua.new_metatable<int>("StringKeyFixture",methods);
+        lua.transfer_stack_object(int{42},"StringKeyFixture",methods);
+        lua_setglobal(root,"StringKeyObject");
+        lua_settop(root,0);
+    }
+    lua.execute_string(R"(
+        assert(ReadString('hello')=='hello')
+        assert(ReadString(123)=='123')
+        assert(StringKeyObject.name=='name')
+        for _,read in ipairs({function(v) return ReadString(v) end,
+                              function(v) return StringKeyObject[v] end}) do
+            for _,value in ipairs({false, {}, function() end, coroutine.create(function() end), StringKeyObject}) do
+                local ok,why=pcall(read,value)
+                assert(not ok, 'non-string unexpectedly accepted')
+                assert(type(why)=='string')
+                assert(ReadString('still usable')=='still usable')
+            end
+            assert(not pcall(read,nil))
+        end
+        assert(not pcall(ReadString))
+        local co=coroutine.create(function()
+            assert(not pcall(function() return StringKeyObject[false] end))
+            assert(StringKeyObject.child=='child')
+        end)
+        assert(coroutine.resume(co))
+    )");
+    CHECK(lua_gettop(root)==0);CHECK(actual_gate_depth==0);
+    CHECK(host.claim_vm_close(vm.value)==Status::ready);
+    CHECK(host.cleanup_vm(vm.value)==Status::ok);
+    {LuaMadeSimple::LuaFinalizationScope closing{root,root};lua_close(root);closing.close_completed();CHECK(host.finish_vm_close(vm.value)==Status::ok);}
+    std::cout<<"PASS string argument rejection through real LMS native dispatch, nested __index delegate, pcall and coroutine; VM remains usable\n";
+}
 static void test_host_vm_slots() {
     auto& host = HostBindings::instance();
     auto& lua = LuaMadeSimple::new_state();
@@ -137,6 +193,7 @@ static void test_host_vm_slots() {
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     CHECK(install_lua_host_integration()); CHECK(install_engine_callback_bindings());
+    test_string_arguments();
     auto& host = HostBindings::instance();
     test_host_vm_slots();
     auto& lua = LuaMadeSimple::new_state();
@@ -242,6 +299,56 @@ int main(int argc, char** argv) {
         lua.register_function("native", function);
         return ue4ss_lua_host_status{UE4SS_LUA_HOST_OK};
     }) == UE4SS_LUA_HOST_OK);
+    // P116: real owner bridge + protected Lua/ABI stack at BOTH queue stages.
+    // Engine scheduling alone is a deterministic seam; the host is not mocked.
+    {LuaMadeSimple::LuaExecutionScope execution{root,root};luaL_openlibs(root);}
+    lua.execute_string("P116={input=0,update=0,asset=0}; function P116_key(k,m,n) assert(k==112 and m==3 and n==9); P116.input=P116.input+1 end; function P116_update() P116.update=P116.update+1 end; function P116_asset(o,why) assert(o==nil and why=='fixture unavailable'); P116.asset=P116.asset+1 end");
+    {
+        using Stack=witchit::uikit::HostStack;
+        std::vector<std::shared_ptr<Slot>> ticks;
+        std::vector<std::function<void()>> signals;
+        std::vector<witchit::uikit::HostReference> references;
+        bool old_refused=false;
+        const auto origin=reinterpret_cast<const void*>(&main);
+        auto install=[&](std::function<void()> body) {
+            ticks.push_back(Slot::Create(std::move(body),origin)); CHECK(ticks.back());
+        };
+        CHECK(host.api().dispatch_lua(vm.value,module.value,stack.value,[&](auto) {
+            // Former production body: only registration was owned. Engine host
+            // dispatch masks native authority, reproducing the live refusal.
+            auto old=host.api().wrap_event([&] {install([&] {
+                try { Stack s(&HostApiRuntime::table(),UE4SS_LUA_HOST_CAP_SCALARS_V1); (void)s; }
+                catch(const witchit::uikit::HostFailure&) {old_refused=true;}
+            });});
+            CHECK(old.status==Status::ok);signals.push_back(old.value);
+            for (const char* name : {"P116_key","P116_update","P116_asset"}) {
+                lua_getglobal(root,name);Stack s(&HostApiRuntime::table(),UE4SS_LUA_HOST_CAP_SCALARS_V1);
+                auto ref=s.take_reference();references.push_back(ref);
+                const auto lane=references.size();
+                auto next=host.api().wrap_game_thread_event([&,ref,lane] {
+                    Stack s(&HostApiRuntime::table(),UE4SS_LUA_HOST_CAP_SCALARS_V1);const auto top=s.top();
+                    s.push_reference(ref);
+                    if(lane==1){s.integer(112);s.integer(3);s.integer(9);}
+                    if(lane==3){s.nil();s.string("fixture unavailable");}
+                    const bool ok=s.call(lane==1?3:lane==3?2:0,0);if(!ok)std::cerr<<"P116 lane "<<lane<<": "<<s.get_string(-1).value_or("<non-string>")<<"\n";CHECK(ok);s.set_top(top);
+                },install);
+                CHECK(next.status==Status::ok);signals.push_back(next.value);
+            }
+            return ue4ss_lua_host_status{UE4SS_LUA_HOST_OK};
+        })==UE4SS_LUA_HOST_OK);
+        for(auto& signal:signals)signal(); // no active consumer Lua context
+        CHECK(ticks.size()==4);
+        for(auto& tick:ticks)CHECK(tick->Invoke());
+        CHECK(old_refused);ticks.clear();
+        lua.execute_string("assert(P116.input==1 and P116.update==1 and P116.asset==1)");
+        signals[1]();CHECK(ticks.size()==1 && ticks[0]->Invoke());ticks.clear();
+        lua.execute_string("assert(P116.input==2)"); // reusable input signal
+        CHECK(host.api().dispatch_lua(vm.value,module.value,stack.value,[&](auto) {
+            Stack s(&HostApiRuntime::table(),UE4SS_LUA_HOST_CAP_SCALARS_V1);for(auto ref:references)s.release(ref);
+            return ue4ss_lua_host_status{UE4SS_LUA_HOST_OK};
+        })==UE4SS_LUA_HOST_OK);
+        std::cout<<"PASS P116 real native two-stage one-shot dispatch: former refusal reproduced, input/updater/asset Lua callbacks delivered, repeatable input and zero idle callbacks\n";
+    }
     lua_pushliteral(root, "untouched root marker");
     auto& thread = lua.new_thread();
     lua_getglobal(thread.get_lua_state(), "native"); lua_pushinteger(thread.get_lua_state(), 21);

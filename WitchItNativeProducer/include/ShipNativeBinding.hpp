@@ -55,10 +55,10 @@ template<class E> class NativeBinding final:public std::enable_shared_from_this<
  bool guard(Stack& s,const std::shared_ptr<Record>& r,Scope lane,Ref operation={}) {
   if(!entry(s) || !r->alive || !engine_.current(r->context))return false;
   int top=s.top();s.push_reference(r->guard);s.string(lane==Scope::edit?"edit":"cleanup");
-  bool accepted=s.call(1,1) && s.is_boolean(-1) && s.get_boolean(-1);s.restore(top);
+  bool accepted=s.call(1,1,L"ship.guard",RC::ensure_str(pirate_ship_policy().world.c_str())) && s.is_boolean(-1) && s.get_boolean(-1);s.restore(top);
   if(!accepted || !entry(s) || !r->alive || !engine_.current(r->context))return false;
   if(operation) {
-   s.push_reference(operation);accepted=s.call(0,1) && s.is_boolean(-1) && s.get_boolean(-1);s.restore(top);
+   s.push_reference(operation);accepted=s.call(0,1,L"ship.operation",RC::ensure_str(pirate_ship_policy().world.c_str())) && s.is_boolean(-1) && s.get_boolean(-1);s.restore(top);
   }
   return accepted && entry(s) && r->alive && engine_.current(r->context);
  }
@@ -74,13 +74,14 @@ template<class E> class NativeBinding final:public std::enable_shared_from_this<
  int operate(Stack& s,Op op) {
   require(entry(s));drain(s);
   if(op==Op::capture) {
-   require(s.top()==4 && s.is_function(1));auto world=text(s,2,1024),layout=text(s,3,256,false);auto generation=s.read(4);
+   require((s.top()==4||s.top()==5) && s.is_function(1));auto lane=s.top()==5?text(s,5,32):"authoring";require(lane=="authoring"||lane=="host-playback"||lane=="guest-presentation");auto world=text(s,2,1024),layout=text(s,3,256,false);auto generation=s.read(4);
    require(generation.kind==UE4SS_LUA_VALUE_INTEGER && generation.integer_value>0 && world==pirate_ship_policy().world);
    Ref guard_ref=s.reference(1);int top=s.top();std::uint64_t id{};
    try {
-    s.push_reference(guard_ref);s.string("edit");require(s.call(1,1) && s.is_boolean(-1) && s.get_boolean(-1));s.restore(top);
+    s.push_reference(guard_ref);s.string("edit");require(s.call(1,1,L"ship.capture",RC::ensure_str(world.c_str())) && s.is_boolean(-1) && s.get_boolean(-1));s.restore(top);
     require(entry(s) && next_context_<UINT64_MAX && records_.size()<64);id=++next_context_;
-    auto r=std::make_shared<Record>();r->guard=guard_ref;r->context=engine_.capture(id,world,layout);records_[id]=r;
+    auto r=std::make_shared<Record>();r->guard=guard_ref;if constexpr(requires{engine_.capture(id,world,layout,lane);})r->context=engine_.capture(id,world,layout,lane);
+    else {require(lane=="authoring");r->context=engine_.capture(id,world,layout);}records_[id]=r;
     require(guard(s,r,Scope::edit));s.token({bridge_,id,id,2,0});return 1;
    }catch(...){if(id)records_.erase(id);s.restore(top);s.release(guard_ref);throw;}
   }

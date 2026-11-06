@@ -16,8 +16,8 @@ Install
 
 Update
 
-Close the game, back up your current mod files, then install matching Core and feature release ZIPs in the same way. Preserve your personal settings and saved maps. The release manifest lists managed files and explicit obsolete files; remove an obsolete file only if it belongs to your previous pack installation. Do not delete whole mod folders or saved-map companions.
+Updates are on by default: the game downloads a new release at the main menu and installs it on the next launch. `Mods` shows progress. To update by hand, untick `Auto-update` there and press `Download update`.
 
-Automatic updates are optional and off by default. This release uses the manual update steps above; the in-game update option is not operational yet. Preparing host versions never joins a server automatically.
+Upgrading from a version older than 0.3.0 needs a manual install: delete `ue4ss` and `dwmapi.dll` first.
 
 All players in a modded session should use the same required package versions. Keep your backup to restore the previous pack with the game closed.

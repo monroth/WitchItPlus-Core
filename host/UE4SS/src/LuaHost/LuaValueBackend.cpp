@@ -268,7 +268,6 @@ ue4ss_lua_host_status LuaValueBackend::protected_call(const LuaValueContext& vie
         }
         const int call_status = uikit_lua_value_call(state, nargs, nresults);
         if (call_status != LUA_OK) {
-            uikit_lua_value_pop_to(state, base);
             return call_status == LUA_YIELD ? ue4ss_lua_host_status{UE4SS_LUA_HOST_YIELD_FORBIDDEN}
                                           : ue4ss_lua_host_status{UE4SS_LUA_HOST_INTERNAL_ERROR};
         }

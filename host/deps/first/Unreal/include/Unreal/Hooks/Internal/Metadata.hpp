@@ -136,6 +136,7 @@ namespace RC::Unreal::Hook::Internal
     };
 
     inline static constexpr bool ALWAYS_TRUE = true;
+    inline Function<void(void*)> StreamableCheckFunction;
 
     template<EDetourTarget Detour>
     inline TDetourMetadata<Detour> GetDetourMetadata() 
@@ -219,6 +220,10 @@ namespace RC::Unreal::Hook::Internal
                 &AActor::BeginPlayInternal,
                 &UnrealInitializer::StaticStorage::GlobalConfig.bHookBeginPlay
             };
+        }
+        else if constexpr(Detour == EDetourTarget::StreamableCheck)
+        {
+            return {&StreamableCheckFunction, &ALWAYS_TRUE};
         }
         else if constexpr(Detour == EDetourTarget::EndPlay) 
         {

@@ -1,46 +1,107 @@
-return function(api)
-    local Core={version=api.version,json=api.json}
-    for _,name in ipairs({'lifetime','match_identity','events','event_clock','work_budget','registry','runtime','guarded_native','teleporter_zone','tick','settings','storage','ufunction'}) do
-        Core[name]=api.module(name)
+local dir=debug.getinfo(1,'S').source:match('^@(.+[\\/])')
+return function(R)
+    local C={}
+    local gp=StaticFindObject('/Script/Engine.Default__GameplayStatics')
+    local current={role='offline',mode='none',is_creative=false,is_playtest=false,is_vanilla_session=true}
+    local listeners={}
+    local vanilla=true
+    -- Fill a Pot+ is chosen on a MatchOptions object; copies of those options keep the choice.
+    local plus={}
+    local hostMode,publishedMode
+    function C.session() return current end
+    function C.on_session(fn) listeners[#listeners+1]=fn;fn(current) end
+    function C.set_plus(options,value) plus[options:GetAddress()]=value or nil end
+    function C.is_plus(options) return plus[options:GetAddress()]==true end
+    local function className(object) return object:GetClass():GetFName():ToString() end
+    local modeOf=dofile(dir..'mode.lua')
+    local function refresh(world,pc)
+        local s={world=world,pc=pc,is_vanilla_session=vanilla}
+        if world then
+            s.gm=R.valid(gp:GetGameMode(world));s.gs=R.valid(gp:GetGameState(world))
+            s.gi=R.valid(gp:GetGameInstance(world))
+        end
+        s.role='offline'
+        if s.gi and s.gi.IsCurrentlyInMatch then s.role=s.gm and 'host' or s.pc and 'client' or 'offline' end
+        s.is_creative=s.gs~=nil and className(s.gs)=='B_CreativeGameState_C'
+        s.is_playtest=s.is_creative and s.gs.IsPlayTestMode==true
+        if s.gi then
+            local options=R.valid(s.gi.IsCurrentlyInMatch and s.gi.UsedMatchOptions or s.gi.NextMatchOptions)
+            local mode=options and R.valid(options.GameMode)
+            if mode then s.mode_id=mode:GetFName():ToString() end
+        end
+        s.mode=modeOf(s,C.is_plus,hostMode)
+        current=s
+        if s.role=='host' and s.mode~=publishedMode then publishedMode=s.mode;C.net.publish('core.mode',s.mode) end
+        for _,fn in ipairs(listeners) do fn(current) end
     end
-    Core.capabilities=api.module('capabilities').new()
-    Core.companion_io=api.module('companion_io')
-    Core.geometry_files=api.module('geometry_files')
-    Core.layout_files=api.module('layout_files').new(api.log)
-    Core.actor_edit_claims=api.module('actor_edit_claims').new(function(scope,path)
-        local p=Core.capabilities.get('layout_hiding')or Core.capabilities.get('fapp_geometry')
-        if not p then return false end
-        if type(p.actor_claimed)~='function'then return true end -- old provider cannot prove exclusivity
-        return p.actor_claimed(scope,path)==true
+    -- Hooks registered through a scope run only while applies(session) is true.
+    function C.scoped(applies)
+        local function gate(fn)
+            return function(...) if applies(current) then return fn(...) end end
+        end
+        return {
+            pre=function(path,fn,raw) R.pre(path,gate(fn),raw) end,
+            post=function(path,fn) R.post(path,gate(fn)) end,
+            on=function(event,fn) R.on(event,gate(fn)) end,
+            session=function(fn) C.on_session(gate(fn)) end,
+        }
+    end
+    C.files=dofile(dir..'files.lua')(R)
+    C.report=dofile(dir..'report.lua')(R)
+    function C.save_report() return C.report.save(dir..'../') end
+    C.saved_rules=dofile(dir..'rules.lua')(R,C)
+    local net,transport=dofile(dir..'net.lua')(R,C)
+    C.net=net
+    C.net.watch('core.mode',function(value)
+        if current.role=='host' then return end
+        hostMode=value;refresh(current.world,current.pc)
     end)
-    function Core.new(owner,options)
-        options=options or {}
-        assert(owner.api_version>=2,'Core needs runtime API 2')
-        local L=Core.lifetime.new(owner)
-        local C={lifetime=L,event_clock=Core.event_clock.new(),storage=Core.storage.new(owner)}
-        C.match_identity=Core.match_identity.new(L); C.events=Core.events.new(L)
-        C.runtime=Core.runtime.new(owner,L)
-        C.work_budget=Core.work_budget.new(owner,options.budget)
-        L.onReset(C.work_budget.reset)
-        if options.install_lifetime~=false then L.install(options.native_travel_hooks) end
-        return C
+    R.on('world_begin',function(world) refresh(world,nil) end)
+    R.on('local_player',function(pc) refresh(pc:GetWorld(),pc) end)
+    R.on('world_end',function()
+        R.log('Core','World end role=%s mode=%s',current.role,current.mode)
+        hostMode,publishedMode=nil,nil;refresh(nil,nil)
+    end)
+    R.post('/Game/Blueprints/Core/B_GameMode.B_GameMode_C:Initialize',function(gm) refresh(gm:GetWorld(),current.pc) end)
+    R.post('/Game/Blueprints/Gamemodes/CreativeMode/B_CreativeGameState.B_CreativeGameState_C:TogglePlayTestMultiCast',function(gs)
+        refresh(gs:GetWorld(),current.pc)
+    end)
+    R.post('/Game/Blueprints/Match/B_MatchOptions.B_MatchOptions_C:CopyMatchOptions',function(options,source)
+        if not R.valid(source) then return end
+        C.set_plus(options,C.is_plus(source))
+        refresh(current.world,current.pc)
+    end)
+    for _,method in ipairs({'Initialize','ShowHUD','ShowTeamSelectionObjective'})do
+        R.post('/Game/Blueprints/UserInterface/B_IngameUIManager.B_IngameUIManager_C:'..method,function(ui)
+            local pc=gp:GetPlayerController(ui,0)
+            refresh(pc:GetWorld(),pc)
+        end)
     end
-    Core.modsync=api.module('modsync')
-    function Core.possession_lifetime(owner)
-        local value=owner.context().possession_lifetime
-        return value==nil and 5 or value
+    -- The game's own connection failures, with their engine type, for both host and guest.
+    -- The game's Blueprint overrides them, so the hooks go on its class.
+    for _,event in ipairs({'HandleNetworkError','HandleTravelError'}) do
+        R.post('/Game/Blueprints/Core/B_GameInstance.B_GameInstance_C:'..event,function(_,kind,server)
+            R.log('Core','%s type=%s server=%s',event,tostring(kind),tostring(server))
+        end)
     end
-    if api.id=='Core' then
-        Core.dialog_input=api.module('dialog_input').install(api,Core)
-        -- Dependents mount the inert service during package construction. The
-        -- committed-own-inventory/hook/input gates still prohibit READY here.
-        local DocumentOwner=api.module('map_document_owner')
-        local owner=DocumentOwner.new(api,Core)
-        local nativeSaveLoad=api.module('native_integration').install(api,Core,owner)
-        Core.write_status=nativeSaveLoad.outcome -- detached scalar status only
-        Core.modpack=api.module('modpack').new(api,Core)
-        Core.package_sync=Core.modsync.new(api,Core,owner)
-        Core.source_geometry=api.module('source_geometry').install(api,Core)
+    -- Who ended a connection, on either side: the kick and return-to-menu calls.
+    local function shown(value)
+        local ok,text=pcall(function() return value:ToString() end)
+        return ok and text or tostring(value)
     end
-    api.publish(Core)
+    for _,path in ipairs({'/Game/Blueprints/UserInterface/B_MenuUIManager.B_MenuUIManager_C:ShowMessageDialog',
+        '/Script/Engine.PlayerController:ClientWasKicked',
+        '/Script/Engine.PlayerController:ClientReturnToMainMenuWithTextReason',
+        '/Game/Blueprints/Player/B_PlayerController.B_PlayerController_C:ClientSetWasKicked',
+        '/Script/PropWitchHuntModule.ProjectVersionBlueprint:KickPlayer'}) do
+        R.post(path,function(_,...)
+            local parts={}
+            for i=1,select('#',...) do parts[i]=shown((select(i,...))) end
+            R.log('Core','%s %s',path:match('([^:]+)$'),table.concat(parts,' '))
+        end)
+    end
+    C.mods=dofile(dir..'mods.lua')(R,C,transport,function(value)
+        vanilla=value;refresh(current.world,current.pc)
+    end)
+    return C
 end

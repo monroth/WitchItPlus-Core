@@ -1,4 +1,5 @@
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/Internal/NativeHookRemoval.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/UPackage.hpp>
@@ -1181,45 +1182,9 @@ namespace RC::Unreal::UObjectGlobals
     auto UnregisterHook(class UFunction* Function, std::pair<int, int> Ids) -> void
     {
         Output::send(STR("Unregistering hook\n"));
-        auto NativeFunction = Function->GetFunc();
-        if (NativeFunction &&
-            NativeFunction != UObject::ProcessInternalInternal.get_function_address() &&
-            Function->HasAnyFunctionFlags(EFunctionFlags::FUNC_Native))
-        {
-            Output::send(STR("Unregistering native hook ({}, {})\n"), Ids.first, Ids.second);
-            if (auto PreNativeId = GlobalHooksInternal::GenericHookIdToNativeHookId.find(Ids.first); PreNativeId != GlobalHooksInternal::GenericHookIdToNativeHookId.end())
-            {
-                Function->UnregisterHook(PreNativeId->second);
-                Output::send(STR("Native hook unregistered\n"));
-            }
-            if (auto PostNativeId = GlobalHooksInternal::GenericHookIdToNativeHookId.find(Ids.second); PostNativeId != GlobalHooksInternal::GenericHookIdToNativeHookId.end())
-            {
-                Function->UnregisterHook(PostNativeId->second);
-            }
-        }
-        else if (NativeFunction &&
-                 NativeFunction == UObject::ProcessInternalInternal.get_function_address() &&
-                 !Function->HasAnyFunctionFlags(EFunctionFlags::FUNC_Native))
-        {
-            if (auto CallbackDataIt = GlobalHooksInternal::GlobalScriptHooks.find(Function->GetFullName()); CallbackDataIt != GlobalHooksInternal::GlobalScriptHooks.end())
-            {
-                for (const auto& CallbackData : CallbackDataIt->second.Callables)
-                {
-                }
-                auto& Callbacks = CallbackDataIt->second.Callables;
-                Callbacks.erase(std::remove_if(Callbacks.begin(), Callbacks.end(), [&](GlobalHooksInternal::CallableData::InternalData& CallbackData) -> bool {
-                    return Ids.first == CallbackData.PreId && Ids.second == CallbackData.PostId;
-                }), Callbacks.end());
-            }
-        }
-        else
-        {
-            std::string error_message{"Was unable to unregister a UFunction hook, information:\n"};
-            error_message.append(fmt::format("UFunction::Func: {}\n", std::bit_cast<void*>(NativeFunction)));
-            error_message.append(fmt::format("ProcessInternal: {}\n", UObject::ProcessInternalInternal.get_function_address()));
-            error_message.append(fmt::format("FUNC_Native: {}\n", static_cast<uint32_t>(Function->HasAnyFunctionFlags(EFunctionFlags::FUNC_Native))));
-            throw std::runtime_error{error_message};
-        }
+        if (Internal::RemoveNativeHookCallbacks(Internal::GetHookedFunctionsMap(),
+                GlobalHooksInternal::GenericHookIdToNativeHookId, Function, Ids)) return;
+        Internal::RemoveScriptHookCallbacks(GlobalHooksInternal::GlobalScriptHooks, Ids);
     }
 
     auto UnregisterHook(const StringType& FunctionFullNameNoType, std::pair<int, int> Ids) -> void

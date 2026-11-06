@@ -140,6 +140,10 @@ public:
     // Queued consumer payloads retain a code pin until their function object
     // is destroyed; retired work is dropped before consumer code is entered.
     Result<std::function<void()>> wrap_event(std::function<void()>);
+    // A worker signal and its later engine-thread callback are distinct host
+    // entries. Preserve the original Lua owner at BOTH boundaries.
+    Result<std::function<void()>> wrap_game_thread_event(std::function<void()>,
+        std::function<void(std::function<void()>)> install);
     // Detach idle queued payloads after admission closes and before exclusive
     // retire. Active snapshots retain the original code pin until they drain.
     Status revoke_queued_events(ModuleHandle);

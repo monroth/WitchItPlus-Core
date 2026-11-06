@@ -94,6 +94,7 @@ namespace RC::Input
       public:
         auto set_input_source(std::string source) -> bool;
         auto process_event() -> void;
+        auto dispatch_event(const InputEvent&) -> void;
 
         // Interfaces for UE4SS and ModSystem for event registration
       public:

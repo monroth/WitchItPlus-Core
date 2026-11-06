@@ -113,6 +113,19 @@ namespace RC::Unreal::Hook
     {
         return I::GetDetourInstance<EDetourTarget::ProcessEvent>()->AddCallback(std::move(Callback), EHookType::Post, std::move(Options), UE4SS_HOOK_REGISTRATION_ORIGIN);
     }
+    auto RegisterProcessEventPreCallback(ProcessEventCallbackWithData callback, FScriptCallbackOptions options) -> GlobalCallbackId
+    {
+        auto filter = std::move(options.ScriptNameFilter);
+        return I::GetDetourInstance<EDetourTarget::ProcessEvent>()->AddCallback(
+            std::move(callback), EHookType::Pre, std::move(options), UE4SS_HOOK_REGISTRATION_ORIGIN, std::move(filter));
+    }
+    auto RegisterProcessEventPostCallback(ProcessEventCallbackWithData callback, FScriptCallbackOptions options) -> GlobalCallbackId
+    {
+        auto filter = std::move(options.ScriptNameFilter);
+        return I::GetDetourInstance<EDetourTarget::ProcessEvent>()->AddCallback(
+            std::move(callback), EHookType::Post, std::move(options), UE4SS_HOOK_REGISTRATION_ORIGIN, std::move(filter));
+    }
+
 
     #pragma endregion
 
@@ -309,6 +322,18 @@ namespace RC::Unreal::Hook
     }
 
     #pragma endregion
+
+    auto RegisterStreamableCheckPostCallback(void* address, StreamableCheckCallbackWithData callback, FCallbackOptions options) -> GlobalCallbackId
+    {
+        if (!address) return ERROR_ID;
+        // Engine code is immutable for the process; never silently retarget an
+        // installed detour on a second consumer's request.
+        if (I::StreamableCheckFunction.is_ready() &&
+            I::StreamableCheckFunction.get_function_address() != address) return ERROR_ID;
+        I::StreamableCheckFunction.assign_address(address);
+        return I::GetDetourInstance<EDetourTarget::StreamableCheck>()->AddCallback(
+            std::move(callback), EHookType::Post, std::move(options), UE4SS_HOOK_REGISTRATION_ORIGIN);
+    }
 
     #pragma region EndPlay
 

@@ -96,6 +96,7 @@ class Lifecycle {
     std::shared_ptr<Detail::State> state_;
 public:
     Lifecycle();
+    void set_wake_callback(void (*)());
     Lifecycle(const Lifecycle&) = delete;
     Lifecycle& operator=(const Lifecycle&) = delete;
     Result<VmHandle> create_vm();

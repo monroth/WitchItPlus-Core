@@ -116,3 +116,14 @@ add_dependencies(${TARGET} proxy_files)
 # Directly set folders for proxy and proxy_files in Programs/proxy
 set_target_properties(${TARGET} PROPERTIES FOLDER "Programs/proxy")
 set_target_properties(proxy_files PROPERTIES FOLDER "Programs/proxy")
+# Local file-only recovery runs before UE4SS/Producer DLLs are loaded. No worker
+# creation, network, engine access or waits under the loader lock.
+enable_language(C)
+get_filename_component(WIP_UPDATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../updater" ABSOLUTE)
+target_sources(${TARGET} PRIVATE "${WIP_UPDATE}/core.cpp" "${WIP_UPDATE}/bootstrap.cpp"
+ "${WIP_UPDATE}/vendor/monocypher.c" "${WIP_UPDATE}/vendor/monocypher-ed25519.c")
+
+# Separate lead test build only. Production has no test key/origin override.
+if(WIP_TEST_PUBLIC_KEY)
+ target_compile_definitions(${TARGET} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:WIP_TEST_PUBLIC_KEY=\"${WIP_TEST_PUBLIC_KEY}\">")
+endif()

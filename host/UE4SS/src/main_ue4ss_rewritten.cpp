@@ -116,6 +116,12 @@ auto get_main_thread_id() -> DWORD
     return mainThreadId;
 }
 
+// Match PAPCFUNC exactly; do not cast an HMODULE callback to an integer ABI.
+static void CALLBACK process_initialized_apc(ULONG_PTR module)
+{
+    process_initialized(reinterpret_cast<HMODULE>(module));
+}
+
 // We're still inside DllMain so be careful what you do here
 auto dll_process_attached(HMODULE moduleHandle) -> void
 {
@@ -123,7 +129,7 @@ auto dll_process_attached(HMODULE moduleHandle) -> void
     if (GetCurrentThreadId() == get_main_thread_id())
     {
         s_wait_for_ue4ss = true;
-        QueueUserAPC((PAPCFUNC)process_initialized, GetCurrentThread(), (ULONG_PTR)moduleHandle);
+        QueueUserAPC(process_initialized_apc, GetCurrentThread(), reinterpret_cast<ULONG_PTR>(moduleHandle));
     }
     else // injected manually -> thread id different from main
     {
@@ -137,7 +143,7 @@ auto WIN_API_FUNCTION_NAME(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpR
 #ifdef UE4SS_LUA_LIFECYCLE_GATE
     // Only the CMake-linked test executable suppresses game startup/scanning.
     // No environment variable changes production loading behavior.
-    if (GetModuleHandleW(L"UE4SSLuaLifecycleGate.exe")) return TRUE;
+    if (GetModuleHandleW(L"UE4SSLuaLifecycleGate.exe") || GetModuleHandleW(L"Native4LinkedGate.exe")) return TRUE;
 #endif
     switch (ul_reason_for_call)
     {
@@ -149,6 +155,7 @@ auto WIN_API_FUNCTION_NAME(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpR
     case DLL_THREAD_DETACH:
         break;
     case DLL_PROCESS_DETACH:
+        CrashDumper::phase(lpReserved ? "shutdown: UE4SS process detach" : "shutdown: UE4SS explicit unload");
         Unreal::UnrealInitializer::IsInitialized() = false;
         Unreal::UnrealInitializer::StaticStorage::bIsInitialized = false;
         // A non-null reserved pointer means the entire process is terminating.

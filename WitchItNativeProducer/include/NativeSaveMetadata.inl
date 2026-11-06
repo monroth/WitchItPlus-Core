@@ -90,9 +90,11 @@ std::vector<witchit::SaveRow> metadata_actor_rows(const MetadataSubject& subject
         }
     }
     if(at!=source.size())throw std::runtime_error("eligible actor/row count differs");
+    witchit::save::upgrade_endpoint_rows(desired);
     return desired;
 }
 void store_statics(FFrame& frame) {
+    if(!witchit::debug::enabled("native_metadata"))return;
     std::lock_guard lock(mutex_);
     if(!attached_ || !IsInGameThreadRaw() || save_scopes_.empty()
         || Hook::Internal::CurrentWitchItStoreStaticsFrame()!=&frame)return;
@@ -136,6 +138,7 @@ void store_statics(FFrame& frame) {
 // endpoint bytes at that physical return, after vanilla material initialisation
 // has consumed/clamped its material indices. No registry or Lua load event.
 void load_carrier_payload(FFrame& frame) noexcept {
+    if(!witchit::debug::enabled("native_metadata"))return;
     try {
         std::lock_guard lock(mutex_);
         if(!attached_ || !IsInGameThreadRaw() || frame.Node()->GetPathName()!=L"/Game/Blueprints/Match/BFL_MapLayoutLoading.BFL_MapLayoutLoading_C:LoadStatics")return;

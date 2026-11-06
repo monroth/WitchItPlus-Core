@@ -9,6 +9,7 @@ extern "C" __declspec(dllimport) int UE4SS_RunLuaModLifecycleGate(const wchar_t*
 extern "C" __declspec(dllimport) int UE4SS_RunLuaModDispatchGate(const wchar_t*,int);
 #include "UpdateFileGate.inl"
 #include "ClipboardGate.inl"
+#include "HashGate.inl"
 extern int run_round7_serial_gate();
 static int report_fault(EXCEPTION_POINTERS* fault) {
     auto* base = GetModuleHandleW(L"UE4SS.dll");
@@ -35,7 +36,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }};
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-    if(run_round7_serial_gate() || run_update_file_gate() || run_clipboard_gate())return 1;
+    if(run_round7_serial_gate() || run_update_file_gate() || run_clipboard_gate() || run_hash_gate())return 1;
     std::cerr << "LIFECYCLE executable entered\n";
     if(argc != 2 && argc != 3) { std::cerr << "usage: UE4SSLuaLifecycleGate candidate-root [--expect-baseline-failure]\n"; return 2; }
     if(argc==3) {

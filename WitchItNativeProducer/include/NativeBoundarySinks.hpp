@@ -1,7 +1,7 @@
 #pragma once
 // Exact-frame scalar delivery on the HOST's active callback stack. No cached
 // Lua wrapper/root, raw Lua symbol, VM construction or caller-selected context.
-#include "UIKitLuaHost.h"
+#include "UIKitHostStack.hpp"
 #include "OperationLedger.hpp"
 #include "LoadLedger.hpp"
 #include <utility>
@@ -49,7 +49,7 @@ class NativeBoundarySinks final {
         auto v=value(UE4SS_LUA_VALUE_INTEGER);v.integer_value=static_cast<std::int64_t>(serial);
         return api->value_push(context,&v)==UE4SS_LUA_HOST_OK;
     }
-    template<class Guard,class... Args> bool emit(ue4ss_lua_reference_handle sink,Guard&& guard,Args&&...args) noexcept {
+    template<class Guard,class... Args> bool emit(std::wstring_view kind,const std::string& path,ue4ss_lua_reference_handle sink,Guard&& guard,Args&&...args) noexcept {
         try {
             ue4ss_lua_host_context_info_v1 info{};
             if(!sink.id || !context(info) || !guard())return false;
@@ -59,12 +59,12 @@ class NativeBoundarySinks final {
                 ~Restore(){(void)api->stack_set_top(context,top);}} restore{api,info.context,top};
             if(api->reference_push(info.context,sink)!=UE4SS_LUA_HOST_OK)return false;
             if(!(push(api,info.context,std::forward<Args>(args)) && ...))return false;
-            if(api->protected_call(info.context,sizeof...(Args),1)!=UE4SS_LUA_HOST_OK)return false;
+            if(api->protected_call(info.context,sizeof...(Args),1)!=UE4SS_LUA_HOST_OK){uikit::callback_failed(api,info.context,kind,RC::ensure_str(path.c_str()));return false;}
             auto result=value(UE4SS_LUA_VALUE_NIL);
             return api->value_read(info.context,-1,&result)==UE4SS_LUA_HOST_OK
                 && result.kind==UE4SS_LUA_VALUE_BOOLEAN && result.boolean_value
                 && api_==api && revision_==revision && context(info) && guard();
-        } catch(...) {return false;}
+        } catch(const std::exception& error) {uikit::callback_error(kind,RC::ensure_str(path.c_str()),error.what());}catch(...) {uikit::callback_error(kind,RC::ensure_str(path.c_str()),"unknown C++ exception");}return false;
     }
 public:
     // NativeProducer must pass only the capability-validated matched host API.
@@ -99,11 +99,11 @@ public:
         // Otherwise the host's owner/VM retirement cleanup releases its refs.
     }
     template<class Guard> bool save(const char* phase,const SaveEntry& e,const std::string& target,bool success,Guard&& guard) noexcept {
-        return emit(save_,std::forward<Guard>(guard),phase,e.serial,e.owner_key,e.requested_name,
+        return emit(L"save",target,save_,std::forward<Guard>(guard),phase,e.serial,e.owner_key,e.requested_name,
             e.compressed,e.autosave,target,success,e.writer_admitted,e.actual_name);
     }
     template<class Guard> bool load(const char* phase,const LoadEntry& e,Guard&& guard) noexcept {
-        return emit(load_,std::forward<Guard>(guard),phase,e.serial,e.owner_key,e.actual_target,
+        return emit(L"load",e.actual_target,load_,std::forward<Guard>(guard),phase,e.serial,e.owner_key,e.actual_target,
             e.compressed,e.recovery,e.recovery_intent_known,e.reader_done,e.reader_success,e.application_done,
             e.layout_name,e.layout_world,e.layout_path);
     }
@@ -111,7 +111,7 @@ public:
     // distinct factual phase, and the eleventh is its owned recovery path.
     template<class Guard> bool publication(const SaveEntry& e,const std::string& target,bool success,
         const std::string& state,const std::string& backup,Guard&& guard) noexcept {
-        return emit(save_,std::forward<Guard>(guard),"disk_outcome",e.serial,e.owner_key,e.requested_name,
+        return emit(L"save.disk_outcome",target,save_,std::forward<Guard>(guard),"disk_outcome",e.serial,e.owner_key,e.requested_name,
             e.compressed,e.autosave,target,success,e.writer_admitted,state,backup);
     }
 };

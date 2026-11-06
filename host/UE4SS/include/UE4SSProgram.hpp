@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -107,6 +108,7 @@ namespace RC
       protected:
 #ifdef HAS_INPUT
         Input::Handler m_input_handler;
+        std::jthread m_input_thread;
 #endif
         std::jthread m_event_loop;
 
@@ -143,6 +145,8 @@ namespace RC
         };
         std::vector<EventCallable> m_queued_events{};
         std::mutex m_event_queue_mutex{};
+        std::condition_variable m_event_ready;
+        bool m_retirement_pending{};
         std::mutex m_render_thread_mutex{};
         std::thread::id m_event_loop_thread_id{};
 
@@ -303,7 +307,13 @@ namespace RC
         {
             return ImGui::GetAllocatorFunctions(alloc_func, free_func, user_data);
         }
+        // Prepare on an admitted module entry, signal once from any thread.
+        // No Lua/engine work runs on the signaling thread. The queued owner
+        // body registers a one-shot GT callback and is revoked at VM teardown.
+        RC_UE4SS_API auto make_game_thread_event(EventCallable callable, bool once = true) -> EventCallable;
         RC_UE4SS_API auto queue_event(EventCallable callable) -> void;
+        auto wake_event_loop() -> void;
+        auto queue_input_event(Input::InputEvent) -> void;
         // Legacy overload for backward compatibility with C++ mods
         RC_UE4SS_API auto queue_event(LegacyEventCallable callable, void* data) -> void;
         RC_UE4SS_API auto is_queue_empty() -> bool;

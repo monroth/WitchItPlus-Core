@@ -39,7 +39,7 @@ public:
  struct Context {
   ue4ss_lua_vm_handle vm{};ue4ss_lua_module_handle module{};
   Observation observation{};std::uint64_t epoch{},document{};
-  Object world,level,game_mode,game_mode_type;std::string world_path,layout;
+  Object world,level,game_mode,game_mode_type;std::string world_path,layout,lane{"authoring"};
  };
  struct Prepared {
   Object source,type,function,enumeration;
@@ -57,27 +57,40 @@ public:
    HostStack stack{host_,UE4SS_LUA_HOST_CAP_SCALARS_V1};
    if(!witchit::uikit::same_handle(stack.info().vm,c.vm) || !witchit::uikit::same_handle(stack.info().module,c.module))return false;
    if(!live(c.world) || !live(c.level) || !live(c.game_mode) || !live(c.game_mode_type))return false;
-   return same(type(c.game_mode),c.game_mode_type) && path(c.game_mode_type)==creative_class
-    && same(object_field(c.world,"PersistentLevel"),c.level)
-    && same(object_field(c.world,"AuthorityGameMode"),c.game_mode)
-    && enum_field(c.game_mode,"Role")==3 && path(c.world)==c.world_path;
+   if(!same(type(c.game_mode),c.game_mode_type)||!same(object_field(c.world,"PersistentLevel"),c.level)||path(c.world)!=c.world_path)return false;
+   const auto kind=path(c.game_mode_type);
+   if(c.lane=="authoring")return kind==creative_class&&same(object_field(c.world,"AuthorityGameMode"),c.game_mode)&&enum_field(c.game_mode,"Role")==3;
+   if(c.lane=="host-playback")return supported_game_mode(kind)&&same(object_field(c.world,"AuthorityGameMode"),c.game_mode)&&enum_field(c.game_mode,"Role")==3;
+   if(c.lane=="guest-presentation")return supported_game_state(kind)&&same(object_field(c.world,"GameState"),c.game_mode)&&enum_field(c.game_mode,"Role")!=3;
+   return false;
   }catch(...){return false;}
  }
  static constexpr auto creative_class="/Game/Blueprints/Gamemodes/CreativeMode/B_CreativeGameMode.B_CreativeGameMode_C";
- Context capture(std::uint64_t document,std::string world_path,std::string layout) {
+ static bool supported_game_mode(const std::string& kind) {
+  return kind==creative_class||kind=="/Game/Blueprints/Core/B_SeekGameMode.B_SeekGameMode_C"
+   ||kind=="/Game/Blueprints/Gamemodes/ObjectiveMode/B_ObjectiveGameMode.B_ObjectiveGameMode_C"
+   ||kind=="/Game/Blueprints/Gamemodes/ImpostorMode/B_ImpostorGameMode.B_ImpostorGameMode_C";
+ }
+ static bool supported_game_state(const std::string& kind) {
+  return kind=="/Game/Blueprints/Gamemodes/CreativeMode/B_CreativeGameState.B_CreativeGameState_C"
+   ||kind=="/Game/Blueprints/Core/B_GameState.B_GameState_C"
+   ||kind=="/Game/Blueprints/Gamemodes/ObjectiveMode/B_ObjectiveGameState.B_ObjectiveGameState_C"
+   ||kind=="/Game/Blueprints/Gamemodes/ImpostorMode/B_ImpostorGameState.B_ImpostorGameState_C";
+ }
+ Context capture(std::uint64_t document,std::string world_path,std::string layout,std::string lane="authoring") {
   require(enabled_ && RC::Unreal::IsInGameThreadRaw() && document && !layout.empty() && layout.size()<=256);
   HostStack stack{host_,UE4SS_LUA_HOST_CAP_SCALARS_V1};Context c;c.vm=stack.info().vm;c.module=stack.info().module;c.epoch=epoch_;c.document=document;
   c.observation=source_.capture(source_.backend);
   require(c.observation.generation && source_.current(source_.backend,c.observation));
   c.world=pin(static_cast<UObject*>(c.observation.world));
   require(c.world.weak.ObjectIndex==c.observation.world_index && c.world.weak.ObjectSerialNumber==c.observation.world_serial);
-  c.world_path=std::move(world_path);c.layout=std::move(layout);
-  c.level=object_field(c.world,"PersistentLevel");c.game_mode=object_field(c.world,"AuthorityGameMode");
+  require(lane=="authoring"||lane=="host-playback"||lane=="guest-presentation");c.lane=std::move(lane);c.world_path=std::move(world_path);c.layout=std::move(layout);
+  c.level=object_field(c.world,"PersistentLevel");c.game_mode=object_field(c.world,c.lane=="guest-presentation"?"GameState":"AuthorityGameMode");
   c.game_mode_type=type(c.game_mode);require(current(c));return c;
  }
  bool same_context(const Context& a,const Context& b) const noexcept {
   return a.epoch==b.epoch && a.document==b.document && a.observation.generation==b.observation.generation
-   && a.world_path==b.world_path && a.layout==b.layout && same(a.world,b.world)
+   && a.lane==b.lane && a.world_path==b.world_path && a.layout==b.layout && same(a.world,b.world)
    && witchit::uikit::same_handle(a.vm,b.vm) && witchit::uikit::same_handle(a.module,b.module);
  }
  Object pin(UObject* object) const {

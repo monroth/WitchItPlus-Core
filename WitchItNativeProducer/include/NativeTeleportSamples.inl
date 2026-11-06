@@ -1,7 +1,6 @@
 // Bounded, game-thread telemetry of only the actual teleported pawn. No world
 // enumeration, UObject roots, Lua callbacks, physics mutation or retry loop.
 struct TeleportSample {Allocation pawn;RC::StringType name;std::chrono::steady_clock::time_point start;TeleportSampleSchedule schedule;std::uint64_t id{};};
-std::vector<TeleportSample> teleport_samples_;
 bool teleport_trace_next_{};
 std::uint64_t teleport_sample_id_{};
 static std::string sample_text(const RC::StringType& text){return std::string(text.begin(),text.end());}
@@ -88,14 +87,8 @@ void teleport_sample(const TeleportSample& sample,double due,double elapsed) noe
 }
 void start_teleport_samples(const Allocation& pawn,const RC::StringType& name) {
  TeleportSample sample{pawn,name,std::chrono::steady_clock::now(),{},++teleport_sample_id_};
- const auto due=sample.schedule.due(0);teleport_sample(sample,*due,0);teleport_samples_.push_back(std::move(sample));
+ teleport_sample(sample,*sample.schedule.due(0),0);
 }
 public:
-void sample_teleport_ticks() noexcept {
- if(!enabled_ || !RC::Unreal::IsInGameThreadRaw() || teleport_samples_.empty())return;
- const auto now=std::chrono::steady_clock::now();
- for(auto& sample:teleport_samples_) {const double elapsed=std::chrono::duration<double>(now-sample.start).count();while(auto due=sample.schedule.due(elapsed))teleport_sample(sample,*due,elapsed);}
- std::erase_if(teleport_samples_,[](const auto& sample){return sample.schedule.done();});
-}
 void arm_teleport_trace() {teleport_trace_next_=true;}
 private:

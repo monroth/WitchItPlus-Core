@@ -15,6 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include "lua.h"
 
@@ -164,7 +167,14 @@ static int os_rename (lua_State *L) {
   const char *fromname = luaL_checkstring(L, 1);
   const char *toname = luaL_checkstring(L, 2);
   errno = 0;
+#if defined(LUA_USE_WINDOWS)
+  if (MoveFileExA(fromname, toname, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return luaL_fileresult(L, 1, NULL);
+  errno = EACCES;
+  return luaL_fileresult(L, 0, NULL);
+#else
   return luaL_fileresult(L, rename(fromname, toname) == 0, NULL);
+#endif
 }
 
 

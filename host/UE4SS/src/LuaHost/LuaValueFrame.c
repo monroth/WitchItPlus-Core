@@ -148,10 +148,14 @@ int uikit_lua_value_run(lua_State* L, struct uikit_lua_value_request* request) {
     return status;
 }
 
+static int callback_traceback(lua_State* L) { luaL_traceback(L, L, luaL_tolstring(L, 1, NULL), 1); return 1; }
 int uikit_lua_value_call(lua_State* L, int nargs, int nresults) {
-    StkId desired = L->top.p - nargs + nresults;
+    int base = lua_gettop(L) - nargs, status;
+    StkId desired = L->top.p - nargs + nresults + 1;
     /* reserve was protected; establish caller result capacity without allocating */
     if (desired > L->stack_last.p) return LUA_ERRMEM;
     if (L->ci->top.p < desired) L->ci->top.p = desired;
-    return lua_pcall(L, nargs, nresults, 0);
+    lua_pushcfunction(L, callback_traceback); lua_insert(L, base);
+    status = lua_pcall(L, nargs, nresults, base);
+    lua_remove(L, base); return status;
 }

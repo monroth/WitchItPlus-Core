@@ -110,6 +110,37 @@ namespace RC::LuaType
                            return 1;
                        });
 
+        // Copy values at the native enumeration boundary. No Lua callbacks run
+        // while a map element is borrowed; marshaling failures escape normally.
+        table.add_pair("Snapshot",
+                       [](const LuaMadeSimple::Lua& lua) -> int {
+                           auto& object = lua.get_userdata<TMap>();
+                           FScriptMapInfo info(object.m_key_property, object.m_value_property);
+                           info.validate_pushers(lua);
+                           auto* map = object.get_remote_cpp_object();
+                           auto* state = lua.get_lua_state();
+                           lua_createtable(state, map->Num(), 0);
+                           const int result = lua_gettop(state);
+                           int row = 0;
+                           for (Unreal::int32 i = 0; i < map->GetMaxIndex(); ++i)
+                           {
+                               if (!map->IsValidIndex(i)) continue;
+                               auto* data = map->GetData(i, info.layout);
+                               lua_createtable(state, 2, 0);
+                               PusherParams params{.operation = LuaMadeSimple::Type::Operation::Get,
+                                                   .lua = lua, .base = object.m_base,
+                                                   .data = data, .property = info.key};
+                               StaticState::m_property_value_pushers[static_cast<int32_t>(info.key_fname.GetComparisonIndex().ToUnstableInt())](params);
+                               lua_rawseti(state, -2, 1);
+                               params.data = static_cast<uint8_t*>(data) + info.layout.ValueOffset;
+                               params.property = info.value;
+                               StaticState::m_property_value_pushers[static_cast<int32_t>(info.value_fname.GetComparisonIndex().ToUnstableInt())](params);
+                               lua_rawseti(state, -2, 2);
+                               lua_rawseti(state, result, ++row);
+                           }
+                           return 1;
+                       });
+
         table.add_pair("ForEach",
                        [](const LuaMadeSimple::Lua& lua) -> int {
                            TMap& lua_object = lua.get_userdata<TMap>();

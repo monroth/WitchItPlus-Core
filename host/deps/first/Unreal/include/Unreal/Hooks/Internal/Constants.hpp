@@ -35,7 +35,8 @@ namespace RC::Unreal::Hook::Internal
     X(GameViewportClientTick,          (uint64_t{1} << 48)) \
     X(CallFunctionByNameWithArguments, (uint64_t{1} << 47)) \
     X(ULocalPlayerExec,                (uint64_t{1} << 46)) \
-    X(FNameConstructor,                (uint64_t{1} << 45))
+    X(FNameConstructor,                (uint64_t{1} << 45)) \
+    X(StreamableCheck,                 (uint64_t{1} << 44))
 
     inline constexpr uint64_t MinNonZero(const uint64_t A, const uint64_t B) noexcept
     {

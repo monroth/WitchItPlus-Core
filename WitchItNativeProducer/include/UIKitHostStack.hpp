@@ -1,5 +1,6 @@
 #pragma once
 #include "UIKitLuaHost.h"
+#include <DynamicOutput/Output.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -28,6 +29,14 @@ inline ue4ss_lua_value_v1 host_value(ue4ss_lua_value_kind kind) noexcept {
     ue4ss_lua_value_v1 result{};
     result.abi_version=UE4SS_UIKIT_LUA_HOST_ABI_VERSION;
     result.struct_size=sizeof(result);result.kind=kind;return result;
+}
+inline void callback_error(std::wstring_view kind,std::wstring_view path,const char* error){
+    RC::Output::send(STR("[WIR] Native.{} path={}: {}\n"),kind,path,RC::ensure_str(error));
+}
+inline void callback_failed(const ue4ss_uikit_lua_host_api_v1* api,ue4ss_lua_context_handle context,std::wstring_view kind,std::wstring_view path){
+    auto value=host_value(UE4SS_LUA_VALUE_NIL);auto status=api->value_read(context,-1,&value);
+    callback_error(kind,path,status==UE4SS_LUA_HOST_OK && value.kind==UE4SS_LUA_VALUE_STRING
+        ?std::string(value.string_data,static_cast<std::size_t>(value.string_size)).c_str():"Lua callback failed without an error string");
 }
 inline bool host_values_available(const ue4ss_uikit_lua_host_api_v1* api,std::uint64_t required=UE4SS_LUA_HOST_CAP_VALUES_V1) noexcept {
     if(!api || ue4ss_lua_host_validate_prefix(api->abi_version,api->struct_size,
@@ -96,9 +105,9 @@ public:
     bool is_function(int at) const{return read(at).kind==UE4SS_LUA_VALUE_FUNCTION;}
     bool is_boolean(int at) const{return read(at).kind==UE4SS_LUA_VALUE_BOOLEAN;}
     bool get_boolean(int at) const{auto v=read(at);return v.kind==UE4SS_LUA_VALUE_BOOLEAN && v.boolean_value;}
-    std::optional<std::string> get_string(int at) const{
+    std::optional<std::string> get_string(int at,std::size_t limit=65536) const{
         auto v=read(at);if(v.kind!=UE4SS_LUA_VALUE_STRING)return {};
-        if(v.string_size>65536 || (!v.string_data && v.string_size))throw HostFailure{UE4SS_LUA_HOST_INTERNAL_ERROR};
+        if(v.string_size>limit || (!v.string_data && v.string_size))throw HostFailure{UE4SS_LUA_HOST_INTERNAL_ERROR};
         return std::string(v.string_data?v.string_data:"",static_cast<size_t>(v.string_size));
     }
     void token(ue4ss_lua_token_v1 t) const{auto v=host_value(UE4SS_LUA_VALUE_TOKEN);v.token=t;push(v);}
@@ -119,10 +128,10 @@ public:
     void release(HostReference r) const{
         if(r)host_require(api_->reference_release(info_.context,r.handle));
     }
-    bool call(int nargs,int nresults) const{
+    bool call(int nargs,int nresults,std::wstring_view kind,std::wstring_view path) const{
         auto status=api_->protected_call(info_.context,nargs,nresults);
         if(status==UE4SS_LUA_HOST_OK)return true;
-        if(status==UE4SS_LUA_HOST_INTERNAL_ERROR || status==UE4SS_LUA_HOST_YIELD_FORBIDDEN)return false;
+        if(status==UE4SS_LUA_HOST_INTERNAL_ERROR || status==UE4SS_LUA_HOST_YIELD_FORBIDDEN){callback_failed(api_,info_.context,kind,path);return false;}
         throw HostFailure{status};
     }
     void callback(ue4ss_lua_callback_handle h,unsigned nup) const{

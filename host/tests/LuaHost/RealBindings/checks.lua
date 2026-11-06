@@ -53,29 +53,28 @@ local function types()
     end
     collectgarbage('collect')
 end
-local function discovery()
+local function runtime_files()
     local scripts=expected..'/Game/Binaries/Win64/ue4ss/Mods/WitchItRuntime/Scripts/'
-    local logs={};local folders=dofile(scripts..'discovery.lua')(scripts,function(s)logs[#logs+1]=s end)
-    -- Stock Lua io.open uses the process ANSI code page on Windows. Keep
-    -- Unicode metadata coverage, but do not assume UTF-8 CRT file opening.
-    local unicode=io.open(expected..'/Game/Binaries/Win64/ue4ss/Mods/\195\156nicodePackage/manifest.lua','r')
-    local count=unicode and 3 or 2;if unicode then unicode:close() end
-    assert(#folders==count,'ROUND6 WIR discovery count expected '..count..', got '..#folders..'; '..table.concat(logs,'; '))
-    assert(folders[1].folder=='ExamplePackage' and folders[2].folder=='SecondPackage','ROUND6 WIR safe package discovery')
-    if count==3 then assert(folders[3].folder=='\195\156nicodePackage','ROUND6 WIR Unicode discovery') end
-    assert(#logs>=2 and logs[#logs]=='discovered '..count..' package folders')
-    if not discovery_capability_reported then
-        print('ROUND6 NOTE stock Lua Unicode manifest io.open: '..(unicode and 'available' or 'unavailable (ANSI code page)'))
-        discovery_capability_reported=true
-    end
+    local files=dofile(scripts..'files.lua')()
+    local path=expected..'/runtime-files/atomic.json'
+    assert(files.write(path,'first'))
+    assert(files.write(path,'second'))
+    assert(files.read(path)=='second','Runtime replaces an existing file atomically')
+    local found=false
+    for _,name in ipairs(files.list(expected..'/runtime-files')) do if name=='atomic.json' then found=true end end
+    assert(found,'Runtime file listing')
+    assert(os.remove(path))
+    local json=dofile(scripts..'json.lua')
+    local values=json.decode(json.encode({1,2,3}))
+    assert(#values==3 and values[3]==3,'Runtime contiguous JSON arrays')
 end
 local function run()
-    local tree=IterateGameDirectories();metadata(tree);types();discovery()
+    local tree=IterateGameDirectories();metadata(tree);types();runtime_files()
     -- First SDK operation in a previously unseen coroutine is the captured
     -- table's metadata lookup, followed by a yield and another Native entry.
     local co=coroutine.create(function()
         assert(tree.Game.__name=='Game','ROUND6 first coroutine metadata');metadata(tree)
-        coroutine.yield('paused');metadata(IterateGameDirectories());types();discovery()
+        coroutine.yield('paused');metadata(IterateGameDirectories());types();runtime_files()
     end)
     local ok,value=coroutine.resume(co);assert(ok,value);assert(value=='paused')
     ok,value=coroutine.resume(co);assert(ok,value);assert(coroutine.status(co)=='dead')
@@ -87,4 +86,4 @@ local function unload()
     run()
     local file=assert(io.open(GateUnloadPath,'w'));assert(file:write('completed'));assert(file:close())
 end
-return {unload=unload,run=run,metadata=metadata,types=types,discovery=discovery}
+return {unload=unload,run=run,metadata=metadata,types=types,runtime_files=runtime_files}

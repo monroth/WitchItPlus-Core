@@ -1032,7 +1032,17 @@ namespace RC::LuaMadeSimple
 
     auto Lua::get_string(int32_t force_index) const -> std::string_view
     {
-        std::string_view string = lua_tostring(checked_lua_state(), force_index);
+        auto* state = checked_lua_state();
+        const char* value = lua_tostring(state, force_index);
+        if (!value)
+        {
+            // lua_tostring returns nullptr for non-string/non-number arguments.
+            // Let protected host dispatch report the type error instead of
+            // invoking string_view's strlen(nullptr), which bypasses Lua pcall.
+            throw std::runtime_error{fmt::format("[Lua::get_string] Expected string or number at index {}, got {}",
+                                                 force_index, lua_typename(state, lua_type(state, force_index)))};
+        }
+        std::string_view string = value;
         lua_remove(checked_lua_state(), force_index);
         return string;
     }
@@ -1597,8 +1607,17 @@ namespace RC::LuaMadeSimple
             if (ticket) {
                 const auto status = host_function_hooks.Dispatch(ticket, data_owner, &return_value);
                 if (status != 0) throw std::runtime_error("Host refused retired/invalid LuaMadeSimple callback");
-            } else if(host_function_hooks.DispatchHost(data_owner,host_function,&return_value)!=0)
-                throw std::runtime_error("Host refused SDK helper");
+            } else {
+                const auto status=host_function_hooks.DispatchHost(data_owner,host_function,&return_value);
+                if(status!=0) {
+                    std::string reason="Host refused SDK helper: status="+std::to_string(status);
+                    if(lua_type(lua_state,-1)==LUA_TSTRING) {
+                        size_t size{};const char* message=lua_tolstring(lua_state,-1,&size);
+                        reason.append("; ").append(message,size);
+                    }
+                    throw std::runtime_error(reason);
+                }
+            }
             for (const auto& post_process_callback : data_owner.m_post_function_process_callbacks)
             {
                 HostAuxiliaryInvocation invocation{&data_owner,lua_state,nullptr,nullptr,0};

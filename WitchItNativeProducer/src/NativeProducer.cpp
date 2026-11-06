@@ -18,6 +18,10 @@
 #include <string>
 #include <vector>
 #include "NativeUpdateFiles.hpp"
+#include "NativeUpdater.hpp"
+#include "NativeDebug.hpp"
+#include "NativeBootControls.hpp"
+#include <fstream>
 #include "NativeClipboard.hpp"
 #include "OperationLedger.hpp"
 #include "LoadLedger.hpp"
@@ -98,6 +102,7 @@ witchit::FrameKey key(FFrame& frame){return reinterpret_cast<witchit::FrameKey>(
 class NativeProducer;
 NativeProducer* instance{};
 class NativeProducer final: public CppUserModBase {
+    witchit::boot::Controls boot_;
     std::recursive_mutex mutex_; // stop/loader thread cannot race Lua dereference
     witchit::NativeBoundarySinks sinks_;
     std::uint64_t generation_{};
@@ -125,43 +130,6 @@ class NativeProducer final: public CppUserModBase {
     FName save_name_,load_name_,intent_name_,apply_name_,store_name_;
 
     #include "NativeSaveMetadata.inl"
-
-    void display_write_outcome(const StringType& state,const StringType& target,const StringType& backup) noexcept {
-        try {
-            const auto world=local_world_.capture();auto* gi=local_world_.game_instance(world);if(!gi)return;
-            auto* managerField=CastField<FObjectProperty>(gi->GetPropertyByNameInChain(FName(L"IngameUIManager",FNAME_Find)));
-            if(!managerField)return;
-            auto* manager=managerField->GetObjectPropertyValue(managerField->ContainerPtrToValuePtr<void>(gi));
-            if(!manager || !UObject::IsReal(manager))return;
-            FWeakObjectPtr weakManager(manager),weakGI(gi);
-            auto current=[&]{return local_world_.current(world) && weakGI.Get()==gi && weakManager.Get()==manager;};
-            if(!current() || manager->GetWorld()!=world.world || !current())return;
-            auto* dialog=manager->GetFunctionByNameInChain(FName(L"ShowMessageDialog",FNAME_Find));
-            if(!dialog || dialog->GetPathName()!=STR("/Game/Blueprints/UserInterface/B_MenuUIManager.B_MenuUIManager_C:ShowMessageDialog"))return;
-            auto* library=UObjectGlobals::StaticFindObject<UObject*>(nullptr,nullptr,STR("/Script/Engine.Default__KismetTextLibrary"));
-            auto* convert=library?library->GetFunctionByNameInChain(FName(L"Conv_StringToText",FNAME_Find)):nullptr;
-            if(!convert || !current())return;
-            FWeakObjectPtr weakDialog(dialog),weakLibrary(library),weakConvert(convert);
-            auto allCurrent=[&]{return current() && weakDialog.Get()==dialog && weakLibrary.Get()==library && weakConvert.Get()==convert;};
-            witchit::save::GetterParameters parameters(dialog,false);
-            auto* title=CastField<FTextProperty>(dialog->FindProperty(FName(L"Title",FNAME_Find)));
-            auto* text=CastField<FTextProperty>(dialog->FindProperty(FName(L"Text",FNAME_Find)));
-            if(!title || !text)return;
-            for(auto [property,message]:{std::pair{title,StringType(L"Save: ")+state},std::pair{text,target+
-                (state==L"UNCERTAIN"?L"\nPublication or rollback could not be verified. Do not retry saving. Preserve the target and recovery data.\nRecovery candidate:\n"+backup:L"\nThe previous destination state was restored (including absence of a file).")}}) {
-                witchit::save::GetterParameters conversion(convert);
-                auto* input=CastField<FStrProperty>(convert->FindProperty(FName(L"InString",FNAME_Find)));
-                auto* result=CastField<FTextProperty>(convert->GetReturnProperty());
-                if(!input || !result || !allCurrent())return;
-                *static_cast<FString*>(conversion.value(input))=FString(message.c_str());
-                library->ProcessEvent(convert,conversion.data());
-                if(!allCurrent())return;
-                property->CopyCompleteValue(parameters.value(property),conversion.value(result));
-            }
-            if(allCurrent())manager->ProcessEvent(dialog,parameters.data());
-            // Real cooked local dialog, not debug PrintString or network chat.
-        }catch(...){} // Host receipt/write blockade survive absent UI or rendering failure.
-    }
 
     bool emit_load(const char* phase,const witchit::LoadEntry& e) {
         if(!attached_ || generation_!=e.bridge_generation)return false;
@@ -216,6 +184,7 @@ class NativeProducer final: public CppUserModBase {
         }
     }
     void load_post(FFrame& frame) {
+        if(!witchit::debug::enabled("native_boundary_hooks"))return;
         load_barriers_.leave(key(frame));
         intents_.erase(key(frame));
         auto apply=applies_.find(key(frame));
@@ -232,7 +201,7 @@ class NativeProducer final: public CppUserModBase {
     }
     void reader(UnrealScriptFunctionCallableContext& call,bool compressed,bool post) {
         std::lock_guard lock(mutex_);
-        if(!attached_ || !IsInGameThreadRaw())return;
+        if(!witchit::debug::enabled("native_boundary_hooks") || !attached_ || !IsInGameThreadRaw())return;
         auto* caller=call.TheStack.PreviousFrame();if(!caller)return;
         auto live=loads_.find(key(*caller));if(!live)return;
         auto held=*live;
@@ -254,7 +223,7 @@ class NativeProducer final: public CppUserModBase {
     }
     void script_pre(UObject* context,FFrame& frame) {
         std::lock_guard lock(mutex_);
-        if(!attached_ || !IsInGameThreadRaw() || !frame.Node())return;
+        if(!witchit::debug::enabled("native_boundary_hooks") || !attached_ || !IsInGameThreadRaw() || !frame.Node())return;
         load_pre(context,frame);
         if(frame.Node()->GetFName()!=save_name_)return;
         if(frame.Node()->GetPathName()!=save_path)return;
@@ -284,7 +253,7 @@ class NativeProducer final: public CppUserModBase {
     }
     void writer(UnrealScriptFunctionCallableContext& call,bool compressed,bool post) {
         std::lock_guard lock(mutex_);
-        if(!attached_ || !IsInGameThreadRaw())return;
+        if(!witchit::debug::enabled("native_boundary_hooks") || !attached_ || !IsInGameThreadRaw())return;
         auto* caller=call.TheStack.PreviousFrame();if(!caller)return;
         if(std::find(save_scopes_.begin(),save_scopes_.end(),key(*caller))==save_scopes_.end())return;
         const auto frame=key(*caller);auto* live=ledger_.find(frame);if(!live)return;
@@ -312,9 +281,14 @@ class NativeProducer final: public CppUserModBase {
     }
     static int attach(const Lua& lua) {
         if(!instance || !IsInGameThreadRaw()){lua.set_bool(false);return 1;}
-        instance->initialize_save_load_on_game_thread();
+        if(!instance->boot_.enabled("file_bridge")){Output::send(STR("[WIR] Producer boot: skip file bridge attach\n"));lua.set_bool(false);return 1;}
         std::lock_guard lock(instance->mutex_);
-        if(!instance->registered_ || !instance->sinks_.attach(witchit::uikit::resolve_host_values())){lua.set_bool(false);return 1;}
+        const bool initialized_before=instance->save_load_started_;
+        instance->initialize_save_load_on_game_thread();
+        const bool callbacks=instance->registered_ && instance->sinks_.attach(witchit::uikit::resolve_host_values());
+        Output::send(STR("[WIR] native SaveLoad attach: initialized_before={} native_routes={} callbacks={} boundary_hooks={} metadata={}\n"),
+            initialized_before,instance->native_hooks_.size(),callbacks,witchit::debug::enabled("native_boundary_hooks"),witchit::debug::enabled("native_metadata"));
+        if(!callbacks){lua.set_bool(false);return 1;}
         instance->ledger_.retire();instance->loads_.retire();instance->load_barriers_.retire();instance->intents_.clear();instance->applies_.clear();instance->save_scopes_.clear();instance->metadata_.clear();
         ++instance->generation_;instance->attached_=true;
         lua.set_bool(true);lua.set_integer(instance->generation_);return 2;
@@ -371,12 +345,29 @@ class NativeProducer final: public CppUserModBase {
     void detach() {attached_=false;++generation_;ledger_.retire();loads_.retire();load_barriers_.retire();intents_.clear();applies_.clear();save_scopes_.clear();metadata_.clear();sinks_.stop();}
 public:
     NativeProducer(){instance=this;ModName=STR("WitchItNativeProducer");ModVersion=STR("0.1.0-stage");ModDescription=STR("Exact-frame save boundaries; runtime validation pending");ModAuthors=STR("monroth");
+        const auto path=witchit::update_files::directory()/L"Mods"/L"Core"/L"source-geometry-debug.json";
+        try {
+            std::error_code ec;const bool exists=std::filesystem::exists(path,ec);
+            if(ec)throw std::runtime_error("Producer boot diagnostic availability unknown");
+            if(exists){std::ifstream input(path,std::ios::binary);if(!input)throw std::runtime_error("Producer boot diagnostic read failed");
+                std::string bytes(16385,'\0');input.read(bytes.data(),static_cast<std::streamsize>(bytes.size()));bytes.resize(static_cast<std::size_t>(input.gcount()));
+                if(input.bad())throw std::runtime_error("Producer boot diagnostic read failed");boot_=witchit::boot::Controls::parse(bytes);}
+            Output::send(STR("[WIR] Producer boot diagnostics: file={} disabled_count={}\n"),path.wstring(),boot_.disabled.size());
+        }catch(const std::exception& e){boot_.disabled={"all"};Output::send(STR("[WIR] Producer boot diagnostics invalid; skip all native activations: {}\n"),ensure_str(e.what()));}
+        for(const auto& name:witchit::boot::Controls::names)if(!boot_.enabled(name.c_str()))Output::send(STR("[WIR] Producer boot: skip {}\n"),ensure_str(name));
+    }
+    bool prepare_uninstall() override {
+        if(!gameplay_)return true;
+        gameplay_->stop();gameplay_->drain();
+        if(!gameplay_->cleanup_complete())return false;
+        gameplay_.reset();return true;
     }
     ~NativeProducer() override {
+        witchit::updater::stop();
         retire_ship_parts();
-        if(gameplay_){if(gameplay_->stop())gameplay_.reset();}
+        if(gameplay_){gameplay_->stop();gameplay_->drain();gameplay_.reset();}
         local_world_.stop();
-        std::lock_guard lock(mutex_);detach();
+        {std::lock_guard lock(mutex_);detach();}
         for(auto id:global_ids_)Hook::UnregisterCallback(id);
         for(const auto& h:native_hooks_)UObjectGlobals::UnregisterHook(h.function,h.ids);
         instance=nullptr;
@@ -412,7 +403,7 @@ public:
         writer_quarantine_ready_=installed==2;
     }
     void initialize_save_load_on_game_thread() {
-        if(!IsInGameThreadRaw())return;
+        if(!boot_.enabled("save_load_startup") || !witchit::debug::enabled("native_boundary_hooks") || !IsInGameThreadRaw())return;
         std::lock_guard lock(mutex_);
         if(save_load_started_)return;
         save_load_started_=true;
@@ -483,29 +474,26 @@ public:
         std::lock_guard lock(mutex_);
         if(unreal_initialized_)return;
         unreal_initialized_=true;
-        install_writer_quarantine();
+        if(boot_.enabled("writer_safety"))install_writer_quarantine();
         // Unreal-init is the host/control thread. EngineTick PRE establishes GT
-        // identity; this owned POST callback then provisions and installs routes.
+        // identity; bOnce removes this POST callback after provisioning the routes.
         // Attach may complete the same phase earlier, but only from verified GT.
+        if(boot_.enabled("save_load_startup")){
         const auto startup_id=Hook::RegisterEngineTickPostCallback(
             [this](auto&,UEngine*,float,bool){initialize_save_load_on_game_thread();},
-            {false,true,STR("WitchItNativeProducer"),STR("owned SaveLoad game-thread startup")});
+            {true,true,STR("WitchItNativeProducer"),STR("owned SaveLoad game-thread startup")});
         if(startup_id==Hook::ERROR_ID){
             Output::send(STR("WIR SaveLoad: UNAVAILABLE game-thread startup callback; physical writer quarantine {}\n"),
                 writer_quarantine_ready_?STR("installed"):STR("incomplete"));
         }else{
             startup_callback_registered_=true;global_ids_.push_back(startup_id);
         }
+        }
         // The Host capabilities are fixed for this process. Do not register
         // global gameplay callbacks when the value bridge cannot start: even an
         // inactive body pays the Native/VM owner dispatch cost on every event.
         if (witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1)) {
-            global_ids_.push_back(Hook::RegisterGameViewportClientTickPostCallback(
-                [this](auto&,UGameViewportClient* viewport,float delta){
-                    if(local_world_.observe(viewport)){if(gameplay_)gameplay_->before_world();ship_parts_before_world();}
-                    if(gameplay_)gameplay_->tick(delta);},
-                {false,true,STR("WitchItNativeProducer"),STR("owned local viewport/world observation")}));
-            global_ids_.push_back(Hook::RegisterLoadMapPreCallback(
+            if(boot_.enabled("travel"))global_ids_.push_back(Hook::RegisterLoadMapPreCallback(
                 [this](auto&,UEngine*,FWorldContext&,FURL,UPendingNetGame*,FString&){if(gameplay_)gameplay_->before_world();local_world_.before_world();ship_parts_before_world();},
                 {false,true,STR("WitchItNativeProducer"),STR("pure Native world retirement for all consumers")}));
         }
@@ -514,12 +502,18 @@ public:
     void on_lua_start(StringViewType mod,Lua& lua,Lua&,Lua&,Lua* hook) override {
         if(mod!=STR("WitchItRuntime"))return;
         retire_ship_parts();
-        if(gameplay_){if(gameplay_->stop())gameplay_.reset();}
+        if(gameplay_){
+            if(!gameplay_->stop())throw std::runtime_error("native previous generation cleanup incomplete");
+            // on_lua_stop_drain already unregistered all external callbacks.
+            if(!gameplay_->drained())throw std::runtime_error("native previous generation has not drained");
+            gameplay_.reset();
+        }
+        if(!gameplay_)witchit::debug::configure("");
         local_world_.stop();
         std::lock_guard lock(mutex_);detach();
-        if(witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1))local_world_.start();
+        if(boot_.enabled("local_world")&&witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1))local_world_.start();
         try {
-            if(auto* host=witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1)) {
+            if(auto* host=witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1);boot_.enabled("ship_binding")&&host) {
                 auto binding=std::make_shared<ShipBinding>(host,local_world_.source());
                 binding->activate();ship_parts_.store(std::move(binding));
             }
@@ -536,26 +530,43 @@ public:
         lua.register_function("WitchItNativeWriterRecoveryVerifyReadyV1",recovery_ready);
         lua.register_function("WitchItNativeWriterRecoveryVerifyResolutionV1",recovery_verified);
         lua.register_function("WitchItNativeProducerDetach",detach_bridge);
+        lua.register_function("WitchItNativeDebug",[](const Lua& caller){
+            try {
+                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1),UE4SS_LUA_HOST_CAP_SCALARS_V1);
+                const auto result=witchit::debug::configure_stack(s,instance && bool(instance->gameplay_));
+                if(result==1)Output::send(STR("[WIR] Core native diagnostics: disabled={}\n"),ensure_str(s.get_string(1).value_or("")));
+                return result;
+            }catch(const std::exception& e){caller.set_bool(false);caller.set_string(e.what());return 2;}
+        });
         lua.register_function("WitchItNativePrimitives",[](const Lua& caller){
-            if(!instance){caller.set_nil();return 1;}
+            if(!instance||!instance->boot_.enabled("primitives")){Output::send(STR("[WIR] Producer boot: skip Native primitives accessor\n"));caller.set_nil();return 1;}
             const auto* host=witchit::uikit::resolve_host_values();
-            if(!host){caller.set_nil();return 1;} // no capability promotion/fallback
             try {
                 if(!instance->gameplay_)instance->gameplay_=std::make_shared<witchit::ScopedGameplay>(host,instance->local_world_);
                 return instance->gameplay_->push()?1:0;
-            }catch(...){caller.set_nil();return 1;}
+            }catch(const std::exception& e){caller.throw_error(e.what());return 0;}
         });
         lua.register_function("WitchItNativeClipboard",[](const Lua& caller){
+            if(!instance||!instance->boot_.enabled("clipboard")){Output::send(STR("[WIR] Producer boot: skip clipboard accessor\n"));caller.set_nil();return 1;}
             try {
-                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values());
+                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1),UE4SS_LUA_HOST_CAP_SCALARS_V1);
                 auto op=s.get_string(1);if(!op)throw std::runtime_error("Native.clipboard: operation required");
                 auto result=witchit::clipboard::execute(*op,s.get_string(2));
                 if(result)s.string(*result);else s.nil();return 1;
             }catch(const std::exception& e){caller.throw_error(e.what());return 0;}
         });
-        lua.register_function("WitchItNativeUpdateFile",[](const Lua& caller){
+        lua.register_function("WitchItNativeUpdater",[](const Lua& caller){
             try {
-                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values());
+                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1),UE4SS_LUA_HOST_CAP_SCALARS_V1);
+                auto operation=s.get_string(1);if(!operation)throw std::runtime_error("updater operation required");
+                auto value=witchit::updater::operation(*operation);
+                if(value)s.string(*value);else s.nil();return 1;
+            }catch(const std::exception& e){caller.throw_error(e.what());return 0;}
+        });
+        lua.register_function("WitchItNativeUpdateFile",[](const Lua& caller){
+            if(!instance||!instance->boot_.enabled("update_file")){Output::send(STR("[WIR] Producer boot: skip updater file accessor\n"));caller.set_nil();return 1;}
+            try {
+                witchit::uikit::HostStack s(witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1),UE4SS_LUA_HOST_CAP_SCALARS_V1);
                 auto operation=s.get_string(1);
                 if(!operation)throw std::runtime_error("Native.update_file: operation required");
                 auto result=witchit::update_files::execute(*operation,s.get_string(2));
@@ -564,6 +575,7 @@ public:
         });
         // Metadata only: execution and marshaling remain in the existing SDK.
         lua.register_function("WitchItNativeFunctionSchema",[](const Lua& caller){
+            if(!instance||!instance->boot_.enabled("schemas")){Output::send(STR("[WIR] Producer boot: skip function schema accessor\n"));caller.set_nil();return 1;}
             try {
                 witchit::uikit::HostStack s(witchit::uikit::resolve_host_values());
                 auto* object=static_cast<UObject*>(s.object(1));
@@ -586,13 +598,23 @@ public:
             }catch(const std::exception& e){caller.throw_error(e.what());return 0;}
         });
 
+        Output::send(STR("[WIR] NativeProducer ready: runtime=WitchItRuntime host_values={} writer_safety={} startup={} viewport={} travel={} local_world={} ship_binding={} primitives={} file_bridge={} schemas={} clipboard={} update_file={}\n"),
+            witchit::uikit::resolve_host_values(UE4SS_LUA_HOST_CAP_SCALARS_V1)!=nullptr,boot_.enabled("writer_safety"),boot_.enabled("save_load_startup"),boot_.enabled("viewport"),boot_.enabled("travel"),boot_.enabled("local_world"),boot_.enabled("ship_binding"),boot_.enabled("primitives"),boot_.enabled("file_bridge"),boot_.enabled("schemas"),boot_.enabled("clipboard"),boot_.enabled("update_file"));
     }
     void on_lua_stop(StringViewType mod,Lua& lua,Lua&,Lua&,Lua*) override {
         if(mod!=STR("WitchItRuntime"))return;
         retire_ship_parts();
-        if(gameplay_){if(gameplay_->stop())gameplay_.reset();}
+        if(gameplay_)gameplay_->stop();
         local_world_.stop();
         std::lock_guard lock(mutex_);detach();
+    }
+    void on_lua_stop_drain(StringViewType mod) override {
+        if(mod!=STR("WitchItRuntime"))return;
+        if(gameplay_){
+            gameplay_->drain();
+            if(gameplay_->cleanup_complete())gameplay_.reset();
+            else Output::send(STR("[WIR] Native teardown retains failed actor rollback until cleanup or world retirement\n"));
+        }
     }
 };
 }

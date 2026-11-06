@@ -120,14 +120,8 @@ bool HostApiRuntime::finish_scalar_bootstrap() noexcept {
 std::uint64_t HostApiRuntime::ready_capabilities() const noexcept {
     if(!scalar_ready_ || !callback_origin_ || !stack_origin_ || !callback_dispatch_)return 0;
     const auto scalar=UE4SS_LUA_HOST_CAP_SCALARS_V1;
-#if defined(UE4SS_DIAGNOSTIC_OBJECT_VALUES_V1) && UE4SS_DIAGNOSTIC_OBJECT_VALUES_V1
-    // Explicit diagnostic-only opt-in. Installing an object backend is not
-    // engine acceptance; shipping source keeps CAP_VALUES_V1 disabled.
     return object_operations_.backend && object_operations_.read && object_operations_.push
         ? scalar|UE4SS_LUA_HOST_CAP_VALUES_V1:scalar;
-#else
-    return scalar;
-#endif
 }
 const ue4ss_uikit_lua_host_api_v1& HostApiRuntime::table() noexcept {
     // Immutable tables: acquiring a new table samples actual host bootstrap.
@@ -799,6 +793,15 @@ Result<std::function<void()>> HostApiRuntime::wrap_event(std::function<void()> f
             else runtime->dispatch_host(vm,event->module,dispatch);
         } else runtime->dispatch_code(event->module,current->function);
     }};
+}
+Result<std::function<void()>> HostApiRuntime::wrap_game_thread_event(
+    std::function<void()> function, std::function<void(std::function<void()>)> install) {
+    if (!install) return {Status::invalid_handle,{}};
+    auto body=wrap_event(std::move(function));
+    if (body.status!=Status::ok) return body;
+    return wrap_event([body=std::move(body.value),install=std::move(install)]() mutable {
+        install(body); // repeatable input signals still create one tick per event
+    });
 }
 Status HostApiRuntime::revoke_queued_events(ModuleHandle module) {
     for(;;) {

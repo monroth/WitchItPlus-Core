@@ -51,38 +51,22 @@ namespace RC::Input
 
     auto Handler::process_event() -> void
     {
-        if (m_platform_handler == nullptr)
+        if (m_platform_handler)
+            for (const auto& event:m_platform_handler->process_event(this)) dispatch_event(event);
+    }
+
+    auto Handler::dispatch_event(const InputEvent& event) -> void
+    {
+        if (!m_allow_input) return;
+        std::vector<OwnedEventCallback> callbacks;
         {
-            return;
+            std::lock_guard lock(m_event_mutex);
+            const auto found=m_key_set.key_data.find(event.key);
+            if (found==m_key_set.key_data.end()) return;
+            for (const auto& entry:found->second)
+                if (entry.required_modifier_keys==event.modifier_keys) callbacks.push_back(entry.callback);
         }
-
-        std::vector<OwnedEventCallback> callbacks_to_call{};
-
-        auto events = m_platform_handler->process_event(this);
-
-        {
-            // Lock the event mutex to access the key_set
-            auto event_update_lock = std::lock_guard(m_event_mutex);
-            for (auto& event : events)
-            {
-                const auto found = m_key_set.key_data.find(event.key);
-                if (found == m_key_set.key_data.end()) continue;
-                for (const auto& key_data : found->second)
-                {
-                    if (key_data.required_modifier_keys == event.modifier_keys)
-                    {
-                        callbacks_to_call.emplace_back(key_data.callback);
-                    }
-                }
-            }
-        }
-
-        // No need to lock the event mutex to call the callbacks
-        // this avoids key registration inside the callback
-        for (const auto& callback : callbacks_to_call)
-        {
-            callback();
-        }
+        for (const auto& callback:callbacks) callback();
     }
 
     auto Handler::register_keydown_event(Input::Key key, EventCallbackCallable callback, uint8_t custom_data, void* custom_data2) -> void

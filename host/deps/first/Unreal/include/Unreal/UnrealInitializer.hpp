@@ -96,6 +96,7 @@ namespace RC::Unreal::UnrealInitializer
     // Should always have valid default values
     struct Config
     {
+        void (*OnShutdown)(){};
     public:
         uint32_t NumScanThreads{8};
         uint32_t MultithreadingModuleSizeThreshold{0x1000000};

@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <condition_variable>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -16,8 +17,6 @@
 
 namespace RC::Unreal::Hook::Internal {
 
-    inline static constexpr unsigned long HOOK_GC_INTERVAL_SECONDS = 3;
-    inline static constexpr unsigned long HOOK_GC_LINKS_PER_ITERATION = 1;
 
     class FCallbackGarbageCollector {
     public:
@@ -78,21 +77,25 @@ namespace RC::Unreal::Hook::Internal {
             return StartBounded;
         }
 
+        void NotifyInvalidated() {
+            std::lock_guard lock(PendingMutex);
+            Pending = true;
+            Ready.notify_one();
+        }
+
         bool StartGCThread() {
             if(GcThread.joinable()) return false;
-
-            GcThread = std::jthread([this](std::stop_token StopToken){
-                unsigned long LastIndexCollected = 0;
-
-                while(true) {
-                    if(StopToken.stop_requested()) {
-                        return;
+            GcThread = std::jthread([this](std::stop_token stop) {
+                while (!stop.stop_requested()) {
+                    {
+                        std::unique_lock lock(PendingMutex);
+                        Ready.wait(lock, stop, [this] { return Pending; });
+                        if (stop.stop_requested()) break;
+                        Pending = false;
                     }
-                    std::this_thread::sleep_for(std::chrono::seconds(HOOK_GC_INTERVAL_SECONDS));
-                    LastIndexCollected = Collect(LastIndexCollected, HOOK_GC_LINKS_PER_ITERATION);
+                    Collect();
                 }
             });
-
             return true;
         }
 
@@ -120,6 +123,9 @@ namespace RC::Unreal::Hook::Internal {
         std::mutex LinkWriteMutex;
         std::atomic<FImmutableLinkVectorPtr> Links = std::make_shared<const FLinkVector>();
 
+        std::mutex PendingMutex;
+        std::condition_variable_any Ready;
+        bool Pending{};
         std::jthread GcThread;
     };
 }

@@ -1,11 +1,29 @@
+#include "SourceComponentBinding.hpp"
+#include "TeleporterArrival.hpp"
+#include "NativeDebug.hpp"
 #pragma once
 #include "NativeSpawnTransaction.hpp"
+#include <string>
+#include "SourceRestorePipeline.hpp"
+#include "SourceRecipe.hpp"
+#include "NativePresetIndex.hpp"
+#include <Unreal/FText.hpp>
+#include <Unreal/Property/FTextProperty.hpp>
+#include <Unreal/Property/FNameProperty.hpp>
+#include <Unreal/Property/FSoftObjectProperty.hpp>
+#include <Unreal/Property/FWeakObjectProperty.hpp>
+#include <Unreal/Property/FSetProperty.hpp>
+#include <Unreal/Property/FDelegateProperty.hpp>
+#include <Unreal/Property/FMulticastInlineDelegateProperty.hpp>
+#include <Unreal/Property/FNumericProperty.hpp>
+#include <cstring>
 #include "NativeFunctionParameters.hpp"
 #include "NativeClassLoader.hpp"
 #include "TeleporterDestination.hpp"
 #include "TeleportSampleSchedule.hpp"
 #include "UIKitHostStack.hpp"
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UPackage.hpp>
 #include <Unreal/UObjectArray.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/UnrealInitializer.hpp>
@@ -20,9 +38,15 @@
 #include <cmath>
 #include <chrono>
 #include <vector>
+#include <memory>
+#include <cstddef>
 #include <source_location>
 #include <string_view>
 #include <map>
+#include <set>
+#include <functional>
+#include <Unreal/Hooks/Hooks.hpp>
+#include <Unreal/SoftObjectPtr.hpp>
 
 namespace witchit::actors {
 class UE4SSEngine final:public RC::Unreal::FUObjectCreateListener {
@@ -43,9 +67,17 @@ class UE4SSEngine final:public RC::Unreal::FUObjectCreateListener {
   return !o.pointer->HasAnyFlags(static_cast<EObjectFlags>(RF_BeginDestroyed|RF_FinishDestroyed))
    && !o.pointer->HasAnyInternalFlags(EInternalObjectFlags::PendingKill|EInternalObjectFlags::Unreachable);
  }
- static Allocation pin(UObject* p){require(p && UObject::IsReal(p));Allocation o;o.pointer=p;o.weak=p;require(usable(o));return o;}
+ // Engine-returned pointers are pinned on the game thread. IsReal scans the
+ // entire UObject array; the indexed weak slot already proves identity/lifetime.
+ inline static thread_local std::uint64_t pin_calls_{};
+ static Allocation pin(UObject* p){++pin_calls_;require(p);Allocation o;o.pointer=p;o.weak=p;require(usable(o));return o;}
  static Property* field(RC::Unreal::UStruct* type,const wchar_t* name,int size) {
-  using namespace RC::Unreal;auto* p=type->FindProperty(FName(name,FNAME_Find));require(p && p->GetArrayDim()==1 && p->GetSize()>0 && p->IsInContainer(size));return p;
+  using namespace RC::Unreal;auto* p=type->FindProperty(FName(name,FNAME_Find));
+  if(!p || p->GetArrayDim()!=1 || p->GetSize()<=0 || !p->IsInContainer(size)) {
+   auto path=type->GetPathName()+L":"+name;
+   throw std::runtime_error("reflected field unavailable/schema differs: "+std::string(path.begin(),path.end()));
+  }
+  return p;
  }
  static UObject* object(UObject* p,const wchar_t* name) {
   using namespace RC::Unreal;auto* f=CastField<FObjectProperty>(field(p->GetClassPrivate(),name,p->GetClassPrivate()->GetStructureSize()));
@@ -105,6 +137,7 @@ class UE4SSEngine final:public RC::Unreal::FUObjectCreateListener {
   return !valid || ending;
  }
 #include "NativeTeleporterLanding.inl"
+#include "NativeRespawnProbe.inl"
 public:
  std::string read_bytes(UObject* actor,const std::wstring& name) {
   using namespace RC::Unreal;pin(actor);
@@ -117,21 +150,29 @@ public:
  using Object=Allocation;
  static Object track(UObject* p){return pin(p);}
  struct Context {ue4ss_lua_vm_handle vm{};ue4ss_lua_module_handle module{};std::uint64_t epoch{};Allocation world,mode,klass,statics,function;bool local_scene{};};
+ bool source_create_listener_{};
  UE4SSEngine(const ue4ss_uikit_lua_host_api_v1* host):host_(host) {
   require(uikit::host_values_available(host_));
-  RC::Unreal::FUObjectArray::AddUObjectCreateListener(this);
+  if(witchit::debug::enabled("native_source_hooks"))source_install_hooks();
+  if(witchit::debug::enabled("native_object_listener")){RC::Unreal::FUObjectArray::AddUObjectCreateListener(this);source_create_listener_=true;}
+  RC::Output::send(STR("[WIR] Core native helper activated: source_hooks={} object_listener={}\n"),witchit::debug::enabled("native_source_hooks"),witchit::debug::enabled("native_object_listener"));
  }
- ~UE4SSEngine(){RC::Unreal::FUObjectArray::RemoveUObjectCreateListener(this);}
- void retire()noexcept{classes_.stop();enabled_=false;destroyed_.clear();teleporters_.clear();teleport_events_.clear();teleport_samples_.clear();teleport_trace_next_=false;}
- void before_world()noexcept{++world_epoch_;destroyed_.clear();teleporters_.clear();teleport_events_.clear();teleport_samples_.clear();teleport_trace_next_=false;}
+ ~UE4SSEngine(){source_unhook();if(source_create_listener_)RC::Unreal::FUObjectArray::RemoveUObjectCreateListener(this);}
+ void drain_hooks()noexcept{source_unhook();}
+ void retire()noexcept{try{release_source_levels();}catch(...){}classes_.stop();enabled_=false;destroyed_.clear();teleporters_.clear();teleport_events_.clear();teleporter_pairs_.clear();teleporter_arrivals_.clear();teleport_trace_next_=false;}
+ void before_world()noexcept{pool_receipts_.clear();preset_index_.clear();source_base_index_.clear();source_positions_.clear();source_static_profiled_=false;source_deferring_=false;source_batch_world_=nullptr;source_batch_classes_.clear();source_begins_.clear();source_owned_.clear();source_restored_.clear();source_rollback_.clear();++world_epoch_;destroyed_.clear();teleporters_.clear();teleport_events_.clear();teleporter_pairs_.clear();teleporter_arrivals_.clear();teleport_trace_next_=false;}
  Context capture(UObject* klass,UObject* worldContext,bool local_scene=false) {
   using namespace RC::Unreal;require(enabled_ && IsInGameThreadRaw(),"active game-thread entry required");Stack stack{host_};Context c;c.vm=stack.info().vm;c.module=stack.info().module;
-  require(worldContext && UObject::IsReal(worldContext),"invalid world context");c.epoch=world_epoch_;
+  pin(worldContext);c.epoch=world_epoch_;
   c.world=pin(reinterpret_cast<UObject*>(worldContext->GetWorld()));
   // Witch It's OpenMatchByOptions adds ?listen even for solo Creative. A
   // NetDriver is transport, not evidence that this authoritative spawn is unsafe.
   c.local_scene=local_scene;c.mode=local_scene?c.world:pin(object(c.world.pointer,L"AuthorityGameMode"));
-  require(local_scene || c.mode.pointer->GetClassPrivate()->GetPathName()==L"/Game/Blueprints/Gamemodes/CreativeMode/B_CreativeGameMode.B_CreativeGameMode_C","authoritative Creative game mode required");
+  auto modePath=c.mode.pointer->GetClassPrivate()->GetPathName();
+  const auto classPath=klass?klass->GetPathName():RC::StringType{};
+  const bool playback=(classPath==L"/Game/Blueprints/StaticProps/B_TeleporterZone.B_TeleporterZone_C"||classPath==L"/Game/Blueprints/StaticProps/Placeable/StaticProps/BP_WitchRuneStone01.BP_WitchRuneStone01_C")
+   &&(modePath==L"/Game/Blueprints/Core/B_GameMode.B_GameMode_C"||modePath==L"/Game/Blueprints/Gamemodes/ObjectiveMode/B_ObjectiveGameMode.B_ObjectiveGameMode_C");
+  require(local_scene || playback || modePath==L"/Game/Blueprints/Gamemodes/CreativeMode/B_CreativeGameMode.B_CreativeGameMode_C","authoritative spawn mode/class refused");
   c.klass=pin(klass ? klass : UObjectGlobals::StaticFindObject<UObject*>(nullptr,nullptr,L"/Script/Engine.Actor"));
   auto* actorClass=UObjectGlobals::StaticFindObject<UClass*>(nullptr,nullptr,L"/Script/Engine.Actor");
   require(c.klass.pointer->IsA<UClass>() && actorClass && static_cast<UClass*>(c.klass.pointer)->IsChildOf(actorClass));
@@ -208,7 +249,7 @@ public:
    auto* result=CastField<FObjectProperty>(field(ownerFn,L"ReturnValue",ownerFn->GetParmsSize()));
    require(result && result->GetSize()==sizeof(UObject*) && result->HasAnyPropertyFlags(CPF_ReturnParm),"component GetOwner schema differs");
    actor.pointer->ProcessEvent(ownerFn,ownerArgs.data());
-   auto* owner=*static_cast<UObject**>(ownerArgs.value(result));require(owner && UObject::IsReal(owner),"component owner unavailable");
+   auto* owner=*static_cast<UObject**>(ownerArgs.value(result));require(owner,"component owner unavailable");pin(owner);
    auto* fn=function(actor.pointer,L"K2_DestroyComponent",L"/Script/Engine.ActorComponent:K2_DestroyComponent");native::Parameters args(fn);
    auto* input=CastField<FObjectProperty>(field(fn,L"Object",fn->GetParmsSize()));
    require(input && input->GetSize()==sizeof(UObject*),"K2_DestroyComponent schema differs");
@@ -226,6 +267,7 @@ public:
   throw std::runtime_error("DestroyActor left actor active: "+std::string(audit.name.begin(),audit.name.end()));
  }
  bool destroy_owned(const Context& c,const Object& actor) {return world_current(c) && destroy(actor);}
+ bool has_destructions()const noexcept{return !destroyed_.empty();}
  void audit_destructions() noexcept {
   if(!enabled_ || !RC::Unreal::IsInGameThreadRaw())return;
   auto pending=std::move(destroyed_);destroyed_.clear();
@@ -239,15 +281,15 @@ public:
   if(existing && !existing->HasAnyFlags(unfinished)){pin(existing);return existing;}
   return nullptr;
  }
- void poll_class_loads() noexcept {
-  if(enabled_ && RC::Unreal::IsInGameThreadRaw())classes_.poll([](const auto& path){return resident_asset(path)!=nullptr;});
+ void asset_completion(std::function<void(const std::wstring&,const std::string&)> fn) {
+  classes_.completed([](const auto& path){return resident_asset(path)!=nullptr;},std::move(fn));
  }
  UObject* load_asset(const std::wstring& path,bool class_only=false) {
   using namespace RC::Unreal;require(enabled_ && IsInGameThreadRaw(),"class loading requires game thread");
+  require(recipe::leaf_asset(path),"whole map packages are not runtime assets; regenerate source geometry offline");
   auto* existing=resident_asset(path);
   if(existing && class_only){require(existing->IsA<UClass>(),"requested class is not UClass");return existing;}
-  // A UWorld can be visible before its actor/component exports finish loading.
-  // For assets, wait for the real streamable completion, not object discovery.
+  // Retain only leaf-asset requests until the real streamable completion.
   if(!class_only && classes_.holds(path)){classes_.request(path,nullptr,false);return classes_.ready(path)?existing:nullptr;}
   auto* library=UObjectGlobals::StaticFindObject<UObject*>(nullptr,nullptr,L"/Script/Engine.Default__KismetSystemLibrary");require(library,"KismetSystemLibrary unavailable");
   auto* make=function(library,L"MakeSoftClassPath",L"/Script/Engine.KismetSystemLibrary:MakeSoftClassPath");native::Parameters pathArgs(make);
@@ -259,7 +301,13 @@ public:
  }
  void release_asset(const std::wstring& path){require(enabled_ && RC::Unreal::IsInGameThreadRaw(),"asset release requires game thread");classes_.release(path);}
  UObject* load_class(const std::wstring& path,UObject*) {return load_asset(path,true);}
+#include "NativeSourceValues.inl"
 #include "NativeSourceGeometry.inl"
+#include "NativeSourceComponentState.inl"
+#include "NativeSourceActors.inl"
+#include "NativeObjectivePool.inl"
+#include "NativeCommands.inl"
+#include "NativePresetNames.inl"
  void NotifyUObjectCreated(const RC::Unreal::UObjectBase* object,RC::Unreal::int32 index)override {
   if(!allocating_ || !object || !RC::Unreal::IsInGameThreadRaw())return;
   if(allocating_->size()>=256){if(overflow_)*overflow_=true;return;}

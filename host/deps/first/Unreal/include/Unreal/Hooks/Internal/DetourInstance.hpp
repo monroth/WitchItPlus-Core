@@ -58,6 +58,13 @@ namespace RC::Unreal::Hook::Internal
         using FTargetFunctionType = Function<InHookReturnType(InArgs...)>;
         using FHookType = InHookReturnType(*)(InArgs...);
 
+        // Engine lifecycle detours use ordinary compiler-generated Win64 calls.
+        // Reject a signature change at build time, before patching any target.
+        static_assert(DetourTarget != EDetourTarget::BeginPlay || std::is_same_v<FHookType, void(*)(AActor*)>,
+                      "BeginPlay detour must preserve the engine actor-only ABI");
+        static_assert(DetourTarget != EDetourTarget::EndPlay || std::is_same_v<FHookType, void(*)(AActor*, EEndPlayReason)>,
+                      "EndPlay detour must preserve the engine actor/reason ABI");
+
     UE_HOOK_PROTECTED:
         using FCallbackDataType = TCallbackData<FCallbackType>;
         using FCallbackVector = std::vector<std::shared_ptr<FCallbackDataType>>;
@@ -159,11 +166,16 @@ namespace RC::Unreal::Hook::Internal
         }
 
         // Returns true if invalid (to-be-removed) callbacks exist in either callback vector.
+        void MarkDirty() {
+            bDirty.store(true, std::memory_order_release);
+            FCallbackGarbageCollector::GetInstance()->NotifyInvalidated();
+        }
+
         bool IsDirty() const { return bDirty.load(std::memory_order_acquire); }
 
         // Prunes invalid callbacks from the callback vectors.
         // Can be called manually from any thread to force GC for this detour, but the FCallbackGarbageCollector will also
-        // periodically call this in its own thread, since this is a mutex-protected operation.
+        // call this after an invalidation signal, since this is a mutex-protected operation.
         // Returns true if the function ran (bDirty was true before CollectGarbage was called), and false otherwise.
         bool CollectGarbage()
         {
@@ -358,7 +370,7 @@ namespace RC::Unreal::Hook::Internal
 
                 if (CallbackData->Invalidate())
                 {
-                    bDirty.store(true, std::memory_order_release);
+                    MarkDirty();
                 }
                 CallbackData->WaitForExecutorsToFinish();
                 return true;
@@ -443,6 +455,14 @@ namespace RC::Unreal::Hook::Internal
                             if (!node || !CallbackInfo->ScriptNameFilter.Accepts(node->GetFName().GetComparisonIndex())) continue;
                         }
                     }
+                    if constexpr (DetourTarget == EDetourTarget::ProcessEvent)
+                    {
+                        if (!CallbackInfo->ScriptNameFilter.Empty())
+                        {
+                            auto* function = std::get<1>(std::tie(Args...));
+                            if (!function || !CallbackInfo->ScriptNameFilter.Accepts(function->GetFName().GetComparisonIndex())) continue;
+                        }
+                    }
                     // Handle once/invalid semantics + executor accounting in a single packed atomic.
                     const bool bOnce = (CallbackInfo->Id & static_cast<uint64_t>(EGlobalCallbackAttributeFlags::Once)) != 0;
 
@@ -452,20 +472,15 @@ namespace RC::Unreal::Hook::Internal
                         continue;
                     }
 
-                    // If we just claimed a 'once' callback, mark the detour as dirty so the next GC pass prunes it.
-                    if (bInvalidatedByOnce)
-                    {
-                        bDirty.store(true, std::memory_order_release);
-                    }
-
                     // Set the current callback data that's used for metadata access in the passed in CallbackData
                     SetCurrentCallbackInfo(IterationData, CallbackInfo.get());
 
                     if (!CallbackInfo->Callback->Invoke(IterationData, Args...))
                     {
-                        if (CallbackInfo->Invalidate()) bDirty.store(true, std::memory_order_release);
+                        if (CallbackInfo->Invalidate()) MarkDirty();
                     }
                     CallbackInfo->EndExecution();
+                    if (CallbackInfo->IsInvalid()) MarkDirty();
                 }
             }
             catch(const std::exception& ex)
@@ -473,7 +488,7 @@ namespace RC::Unreal::Hook::Internal
                 auto* CurrentCallback = GetCurrentCallbackInfo(IterationData);
                 if (CurrentCallback && CurrentCallback->Invalidate())
                 {
-                    bDirty.store(true, std::memory_order_release);
+                    MarkDirty();
                 }
                 if (CurrentCallback)
                 {
@@ -491,7 +506,7 @@ namespace RC::Unreal::Hook::Internal
 
                 if (CurrentCallback && CurrentCallback->Invalidate())
                 {
-                    bDirty.store(true, std::memory_order_release);
+                    MarkDirty();
                 }
                 if (CurrentCallback)
                 {

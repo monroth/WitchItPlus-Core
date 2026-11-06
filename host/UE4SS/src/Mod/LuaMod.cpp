@@ -8,6 +8,13 @@
 #include <limits>
 #include <utility>
 #ifdef UE4SS_LUA_LIFECYCLE_GATE
+#include <LuaHost/HostIntegration.hpp>
+#include <CrashDiagnostics.hpp>
+#include "../../../../../consumer/native/include/UIKitHostStack.hpp"
+#include "../../../../../consumer/native/include/NativeHash.hpp"
+#include "../../../../../consumer/native/include/SourceRecipe.hpp"
+#include "../../../../../consumer/native/include/NativeDebug.hpp"
+#include "../../../../../consumer/native/include/NativeBootControls.hpp"
 #include <iostream>
 #include <atomic>
 #include <optional>
@@ -780,7 +787,8 @@ namespace RC
                                  host.cleanup_vm(vm.value)==LuaHost::Status::ok))
             {
                 if (vm.value.id) {
-                    LuaMadeSimple::LuaFinalizationScope closing{m_lua.get_lua_state(), m_lua.get_root_lua_state()};
+                    CrashDumper::phase("shutdown: Lua state close (hooks and references retired)");
+        LuaMadeSimple::LuaFinalizationScope closing{m_lua.get_lua_state(), m_lua.get_root_lua_state()};
                     lua_close(m_lua.get_lua_state());
                     closing.close_completed();
                     host.finish_vm_close(vm.value);
@@ -827,7 +835,8 @@ namespace RC
             if (host.claim_vm_close(m_host_vm) == LuaHost::Status::ready &&
                 host.cleanup_vm(m_host_vm) == LuaHost::Status::ok)
             {
-                LuaMadeSimple::LuaFinalizationScope closing{m_lua.get_lua_state(), m_lua.get_root_lua_state()};
+                CrashDumper::phase("shutdown: Lua state close (hooks and references retired)");
+        LuaMadeSimple::LuaFinalizationScope closing{m_lua.get_lua_state(), m_lua.get_root_lua_state()};
                 lua_close(m_lua.get_lua_state());
                 closing.close_completed();
                 host.finish_vm_close(m_host_vm);
@@ -4168,6 +4177,19 @@ Overloads:
         },dispatch_error);
     }
 
+#ifdef UE4SS_LUA_LIFECYCLE_GATE
+    static bool (*offline_shared_dispatcher_registration)(bool engine_tick){};
+    static bool (*offline_dispatcher_available)(bool engine_tick){};
+#endif
+    static bool offline_dispatchers()
+    {
+#ifdef UE4SS_LUA_LIFECYCLE_GATE
+        return offline_shared_dispatcher_registration!=nullptr;
+#else
+        return false;
+#endif
+    }
+
     auto static process_event_hook([[maybe_unused]] Unreal::Hook::TCallbackIterationData<void>& CallbackIterationData,
                                    [[maybe_unused]] Unreal::UObject* Context,
                                    [[maybe_unused]] Unreal::UFunction* Function,
@@ -4209,6 +4231,8 @@ Overloads:
         } catch(...) {dispatch_error();}
     }
 
+    static void refresh_deferred_dispatch();
+
     auto static engine_tick_hook([[maybe_unused]] Unreal::Hook::TCallbackIterationData<void>& CallbackIterationData,
                                  [[maybe_unused]] Unreal::UEngine* Context,
                                  [[maybe_unused]] float DeltaSeconds,
@@ -4219,12 +4243,22 @@ Overloads:
         try {
 
         process_simple_actions(LuaMod::m_engine_tick_actions);
+        if(!offline_dispatchers()) {
+            process_simple_actions(LuaMod::m_game_thread_actions);
+            process_delayed_actions<GameThreadExecutionMethod::ProcessEvent>(LuaMod::m_delayed_game_thread_actions);
+        }
         process_delayed_actions<GameThreadExecutionMethod::EngineTick>(LuaMod::m_delayed_game_thread_actions);
 
         process_pending_notify_on_new_object_callbacks();
 
         {
             std::lock_guard<std::recursive_mutex> guard{LuaMod::m_thread_actions_mutex};
+            if (!offline_dispatchers() && !LuaMod::m_pending_game_thread_actions.empty()) {
+                LuaMod::m_game_thread_actions.insert(LuaMod::m_game_thread_actions.end(),
+                    std::make_move_iterator(LuaMod::m_pending_game_thread_actions.begin()),
+                    std::make_move_iterator(LuaMod::m_pending_game_thread_actions.end()));
+                LuaMod::m_pending_game_thread_actions.clear();
+            }
             if (!LuaMod::m_pending_engine_tick_actions.empty())
             {
                 LuaMod::m_engine_tick_actions.insert(
@@ -4243,12 +4277,9 @@ Overloads:
             }
         }
         } catch(...) {dispatch_error();}
+        refresh_deferred_dispatch();
     }
 
-#ifdef UE4SS_LUA_LIFECYCLE_GATE
-    static bool (*offline_shared_dispatcher_registration)(bool engine_tick){};
-    static bool (*offline_dispatcher_available)(bool engine_tick){};
-#endif
     // Local convenience wrappers for Capabilities functions
     static auto is_engine_tick_hook_available() -> bool
     {
@@ -4282,10 +4313,89 @@ Overloads:
 #ifdef UE4SS_LUA_LIFECYCLE_GATE
         if(offline_shared_dispatcher_registration) return offline_shared_dispatcher_registration(engine_tick);
 #endif
-        const auto id=engine_tick
-            ? Unreal::Hook::RegisterEngineTickPreCallback(engine_tick_hook, {false, false, STR("UE4SS"), STR("LuaModImpl")})
-            : Unreal::Hook::RegisterProcessEventPreCallback(process_event_hook, {false, false, STR("UE4SS"), STR("LuaModImpl")});
-        return id!=Unreal::Hook::ERROR_ID;
+        // The production DLL also exports the offline lifecycle gate. Only an
+        // installed fixture replaces delivery; its build flag is not a mode.
+        // Advertise the prepared route without installing an idle observer.
+        return UE4SSRuntime::IsEngineTickAvailable();
+    }
+    struct DeferredDispatch final
+    {
+        PTP_TIMER timer{};
+        Unreal::Hook::GlobalCallbackId frame{};
+        bool stopped{};
+        DeferredDispatch()
+        {
+            timer=CreateThreadpoolTimer([](PTP_CALLBACK_INSTANCE,void* context,PTP_TIMER) {
+                auto& self=*static_cast<DeferredDispatch*>(context);
+                std::lock_guard lock(LuaMod::m_thread_actions_mutex);
+                if(self.stopped || self.frame)return;
+                self.frame=Unreal::Hook::RegisterEngineTickPreCallback(
+                    [&self](auto& info,Unreal::UEngine* engine,float delta,bool idle) {
+                        {std::lock_guard lock(LuaMod::m_thread_actions_mutex);self.frame={};if(self.stopped)return;}
+                        engine_tick_hook(info,engine,delta,idle);
+                    },{true,false,STR("UE4SS"),STR("finite queued Lua delivery")});
+            },this,nullptr);
+            if(!timer)throw std::runtime_error("one-shot Lua deadline creation failed");
+        }
+        ~DeferredDispatch() { stop(); }
+        void stop()
+        {
+            if(!timer)return;
+            {std::lock_guard lock(LuaMod::m_thread_actions_mutex);stopped=true;SetThreadpoolTimer(timer,nullptr,0,0);}
+            WaitForThreadpoolTimerCallbacks(timer,TRUE);
+            Unreal::Hook::GlobalCallbackId pending{};
+            {std::lock_guard lock(LuaMod::m_thread_actions_mutex);pending=frame;frame={};}
+            if(pending)Unreal::Hook::UnregisterCallback(pending);
+            CloseThreadpoolTimer(timer);timer=nullptr;
+        }
+        void arm(std::optional<std::chrono::steady_clock::time_point> due)
+        {
+            if(stopped)return;
+            if(!due){
+                SetThreadpoolTimer(timer,nullptr,0,0);
+                // A published one-shot may already be executing, before its
+                // body acquires m_thread_actions_mutex. Unregister waits for
+                // that executor; refresh holds this mutex (and may own Lua's
+                // gate), so waiting here deadlocks both threads. Let the finite
+                // delivery drain, even when there is no longer any leaf work.
+                // Keep its id until entry so newly queued work reuses it.
+                return;
+            }
+            if(frame)return;
+            auto ticks=std::chrono::duration_cast<std::chrono::nanoseconds>(*due-std::chrono::steady_clock::now()).count()/100;
+            LARGE_INTEGER when{};when.QuadPart=-std::max<long long>(1,ticks);
+            FILETIME ft{when.LowPart,static_cast<DWORD>(when.HighPart)};
+            SetThreadpoolTimer(timer,&ft,0,0); // one-shot, no frame checks of time
+        }
+    };
+    // Constructed while the actions mutex still exists; explicitly joined by
+    // the event thread, never first joined from DLL detach under loader lock.
+    static DeferredDispatch& deferred_delivery() { static DeferredDispatch delivery;return delivery; }
+    void LuaMod::shutdown_deferred_dispatch()
+    {
+#ifdef UE4SS_LUA_LIFECYCLE_GATE
+        if(offline_shared_dispatcher_registration)return;
+#endif
+        deferred_delivery().stop();
+    }
+    static void refresh_deferred_dispatch()
+    {
+#ifdef UE4SS_LUA_LIFECYCLE_GATE
+        if(offline_shared_dispatcher_registration)return;
+#endif
+        std::lock_guard lock(LuaMod::m_thread_actions_mutex);
+        std::optional<std::chrono::steady_clock::time_point> due;
+        auto now=std::chrono::steady_clock::now();
+        if(!LuaMod::m_engine_tick_actions.empty() || !LuaMod::m_pending_engine_tick_actions.empty() ||
+           !LuaMod::m_game_thread_actions.empty() || !LuaMod::m_pending_game_thread_actions.empty() ||
+           !LuaMod::m_pending_notify_on_new_object_callbacks.empty())due=now;
+        for(const auto* list:{&LuaMod::m_delayed_game_thread_actions,&LuaMod::m_pending_delayed_game_thread_actions})
+            for(const auto& action:*list){
+                if(action.status==LuaMod::DelayedActionStatus::Paused)continue;
+                auto at=action.status==LuaMod::DelayedActionStatus::PendingRemoval || action.frames_remaining>0 ? now:action.execute_at;
+                if(!due || at<*due)due=at;
+            }
+        deferred_delivery().arm(due);
     }
     auto LuaMod::ensure_engine_tick_hooked() -> void
     {
@@ -4397,6 +4507,8 @@ Overloads:
                 }
             }
 
+            refresh_deferred_dispatch();
+
     }
 
     auto LuaMod::setup_lua_global_functions_main_state_only() const -> void
@@ -4407,14 +4519,26 @@ Overloads:
             std::string error_overload_not_found{R"(
 No overload found for function 'RegisterHook'.
 Overloads:
-#1: RegisterHook(string UFunction_Name, LuaFunction Callback, LuaFunction PostCallback))"};
+#1: RegisterHook(string UFunction_Name, LuaFunction Callback, LuaFunction PostCallback)
+#2: RegisterHook(UFunction Function, LuaFunction Callback, LuaFunction PostCallback))"};
 
-            if (!lua.is_string())
+            Unreal::UFunction* unreal_function{};
+            StringType function_name_no_prefix;
+            if (lua.is_string())
             {
-                lua.throw_error(error_overload_not_found);
+                function_name_no_prefix = get_function_name_without_prefix(ensure_str(lua.get_string()));
+                unreal_function = Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(nullptr, nullptr, function_name_no_prefix);
             }
-
-            auto function_name_no_prefix = get_function_name_without_prefix(ensure_str(lua.get_string()));
+            else if (lua.is_userdata())
+            {
+                auto* object = lua.get_userdata<LuaType::UFunction>().get_remote_cpp_object();
+                if (!object || !object->IsA<Unreal::UFunction>()) lua.throw_error(error_overload_not_found);
+                unreal_function = static_cast<Unreal::UFunction*>(object);
+                function_name_no_prefix = unreal_function->GetPathName();
+            }
+            else lua.throw_error(error_overload_not_found);
+            if (!unreal_function)
+                lua.throw_error("RegisterHook requires a resident UFunction");
 
             if (!lua.is_function())
             {
@@ -4441,14 +4565,6 @@ Overloads:
                 lua_xmove(lua.get_lua_state(), hook_lua->get_lua_state(), 1);
                 lua_post_callback_registry_index = luaL_ref(hook_lua->get_lua_state(), LUA_REGISTRYINDEX);
                 has_post_callback = true;
-            }
-
-            Unreal::UFunction* unreal_function = Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(nullptr, nullptr, function_name_no_prefix);
-            if (!unreal_function)
-            {
-                lua.throw_error(std::format(
-                        "Tried to register a hook with Lua function 'RegisterHook' but no UFunction with the specified name was found.\nFunction Name: {}",
-                        to_string(function_name_no_prefix)));
             }
 
             int32_t pre_id{};
@@ -4576,6 +4692,7 @@ Overloads:
         // ExecuteInGameThreadWithDelay - executes callback after a time delay
         // Uses default method from config, falls back to the other if unavailable
         m_lua.register_function("ExecuteInGameThreadWithDelay", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'ExecuteInGameThreadWithDelay'.
 Overloads:
@@ -4697,6 +4814,7 @@ Overloads:
         // RetriggerableExecuteInGameThreadWithDelay - executes callback after a time delay, resets timer if called again with same handle
         // Uses default method from config, falls back to the other if unavailable
         m_lua.register_function("RetriggerableExecuteInGameThreadWithDelay", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'RetriggerableExecuteInGameThreadWithDelay'.
 Overloads:
@@ -4779,6 +4897,7 @@ Overloads:
         // ExecuteInGameThreadAfterFrames - executes callback after a frame delay
         // Requires EngineTick hook - cannot fall back to ProcessEvent since frames cannot be counted there
         m_lua.register_function("ExecuteInGameThreadAfterFrames", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'ExecuteInGameThreadAfterFrames'.
 Overloads:
@@ -4834,6 +4953,7 @@ Overloads:
         // LoopInGameThreadWithDelay - executes callback repeatedly with a time delay
         // Uses default method from config, falls back to the other if unavailable
         m_lua.register_function("LoopInGameThreadWithDelay", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'LoopInGameThreadWithDelay'.
 Overloads:
@@ -4889,6 +5009,7 @@ Overloads:
         // LoopInGameThreadAfterFrames - executes callback repeatedly with a frame delay
         // Requires EngineTick hook - cannot fall back to ProcessEvent since frames cannot be counted there
         m_lua.register_function("LoopInGameThreadAfterFrames", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'LoopInGameThreadAfterFrames'.
 Overloads:
@@ -4945,6 +5066,7 @@ Overloads:
 
         // ResetDelayedActionTimer - resets the timer for any delayed action using the original delay (only if owned by calling mod)
         m_lua.register_function("ResetDelayedActionTimer", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'ResetDelayedActionTimer'.
 Overloads:
@@ -5009,6 +5131,7 @@ Overloads:
 
         // SetDelayedActionTimer - sets a new delay for a delayed action and restarts the timer (only if owned by calling mod)
         m_lua.register_function("SetDelayedActionTimer", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'SetDelayedActionTimer'.
 Overloads:
@@ -5079,6 +5202,7 @@ Overloads:
 
         // PauseDelayedAction - pauses a delayed action timer (only if owned by calling mod)
         m_lua.register_function("PauseDelayedAction", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'PauseDelayedAction'.
 Overloads:
@@ -5158,6 +5282,7 @@ Overloads:
 
         // UnpauseDelayedAction - resumes a paused delayed action timer (only if owned by calling mod)
         m_lua.register_function("UnpauseDelayedAction", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'UnpauseDelayedAction'.
 Overloads:
@@ -5208,6 +5333,7 @@ Overloads:
 
         // CancelDelayedAction - cancels a delayed action (only if owned by calling mod)
         m_lua.register_function("CancelDelayedAction", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'CancelDelayedAction'.
 Overloads:
@@ -5255,6 +5381,7 @@ Overloads:
 
         // IsValidDelayedActionHandle - checks if a handle refers to an existing, non-cancelled action
         m_lua.register_function("IsValidDelayedActionHandle", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'IsValidDelayedActionHandle'.
 Overloads:
@@ -5297,6 +5424,7 @@ Overloads:
 
         // IsDelayedActionActive - checks if a delayed action is active (not paused or cancelled)
         m_lua.register_function("IsDelayedActionActive", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'IsDelayedActionActive'.
 Overloads:
@@ -5339,6 +5467,7 @@ Overloads:
 
         // IsDelayedActionPaused - checks if a delayed action is paused
         m_lua.register_function("IsDelayedActionPaused", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'IsDelayedActionPaused'.
 Overloads:
@@ -5381,6 +5510,7 @@ Overloads:
 
         // GetDelayedActionTimeRemaining - returns remaining time in milliseconds (or frames for frame-based)
         m_lua.register_function("GetDelayedActionTimeRemaining", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'GetDelayedActionTimeRemaining'.
 Overloads:
@@ -5464,6 +5594,7 @@ Overloads:
 
         // GetDelayedActionTimeElapsed - returns elapsed time in milliseconds (or frames for frame-based)
         m_lua.register_function("GetDelayedActionTimeElapsed", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'GetDelayedActionTimeElapsed'.
 Overloads:
@@ -5549,6 +5680,7 @@ Overloads:
 
         // GetDelayedActionRate - returns the configured delay rate (not remaining time)
         m_lua.register_function("GetDelayedActionRate", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'GetDelayedActionRate'.
 Overloads:
@@ -5607,6 +5739,7 @@ Overloads:
 
         // ClearAllDelayedActions - cancels all delayed actions for the current mod
         m_lua.register_function("ClearAllDelayedActions", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'ClearAllDelayedActions'.
 Overloads:
@@ -5644,6 +5777,7 @@ Overloads:
 
         // MakeHandle - returns a unique action handle
         m_lua.register_function("MakeActionHandle", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             std::string error_overload_not_found{R"(
 No overload found for function 'MakeActionHandle'.
 Overloads:
@@ -5655,6 +5789,7 @@ Overloads:
         });
 
         m_lua.register_function("RestartCurrentMod", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             auto mod = get_mod_ref(lua);
             if (!mod)
             {
@@ -5669,6 +5804,7 @@ Overloads:
         });
 
         m_lua.register_function("UninstallCurrentMod", [](const LuaMadeSimple::Lua& lua) -> int {
+            struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
             auto mod = get_mod_ref(lua);
             if (!mod)
             {
@@ -6046,7 +6182,7 @@ Overloads:
             return;
         }
 
-        LuaHost::ModLuaEntry entry{m_lua};
+
 #ifdef UE4SS_LUA_LIFECYCLE_GATE
         if (offline_prepare(this)) return;
 #endif
@@ -6055,6 +6191,8 @@ Overloads:
         const auto controls=program.get_mods_snapshot();
         ids.reserve(controls.size());
         for (const auto& mod : controls) ids.push_back(mod->get_id());
+        {
+        LuaHost::ModLuaEntry entry{m_lua};
         for (auto id : ids)
         {
             auto mod = program.borrow_mod_by_id(id);
@@ -6066,6 +6204,13 @@ Overloads:
                 }
                 cpp_mod->fire_on_lua_stop(get_name(), m_lua, *m_main_lua, *m_async_lua, m_hook_lua);
             }
+        }
+        } // release the actual Lua gate before any executor drain
+        for (auto id : ids)
+        {
+            auto mod = program.borrow_mod_by_id(id);
+            if (auto cpp_mod = dynamic_cast<CppMod*>(mod.get()); cpp_mod && mod->is_started())
+                cpp_mod->fire_on_lua_stop_drain(get_name());
         }
     }
 
@@ -6246,12 +6391,14 @@ Overloads:
 
     auto LuaMod::uninstall() -> void
     {
+        struct Refresh {~Refresh(){refresh_deferred_dispatch();}} refresh;
         if (host_close_complete() || m_host_uninstall_running) return;
         struct Running {
             bool& flag;
             explicit Running(bool& value) : flag(value) { flag = true; }
             ~Running() { flag = false; }
         } running{m_host_uninstall_running};
+        CrashDumper::phase("shutdown: Lua async join");
         Output::send(STR("Stopping mod '{}' for uninstall\n"), m_mod_name);
 
         // Stop the async thread BEFORE acquiring the mutex to avoid deadlock
@@ -6266,6 +6413,7 @@ Overloads:
         // them once while the VM is still open, before closing admission.
         if (!m_host_stop_notified)
         {
+            CrashDumper::phase("shutdown: Lua stop callbacks (native then Lua)");
             m_host_stop_notified = true;
             fire_on_lua_stop_for_cpp_mods();
             fire_on_lua_stop_for_self();
@@ -6387,6 +6535,7 @@ Overloads:
             item->unreal_function->UnregisterHook(item->post_callback_id);
         }
 
+        CrashDumper::phase("shutdown: Lua state close (hooks and references retired)");
         LuaMadeSimple::LuaFinalizationScope closing{m_lua.get_lua_state(), m_lua.get_root_lua_state()};
         if (m_async_lua && m_async_lua->get_lua_state())
         {
@@ -6402,6 +6551,7 @@ Overloads:
         closing.close_completed();
         if (host.finish_vm_close(m_host_vm) != LuaHost::Status::ok)
             throw std::runtime_error("Real Lua VM closed but host finalization failed");
+        CrashDumper::phase("shutdown: Lua state closed");
         m_host_vm_closed = true;
         m_main_lua = nullptr;
         m_async_lua = nullptr;
@@ -6976,6 +7126,7 @@ Overloads:
                                 const auto index=constructed_object->GetInternalIndex();
                                 if(auto* item=Unreal::FUObjectArray::IndexToObject(index))
                                     m_pending_notify_on_new_object_callbacks.push_back({callback.callback_id,index,item->GetSerialNumber()});
+                                    refresh_deferred_dispatch();
                             }
                         }
                     }
@@ -7449,32 +7600,26 @@ Overloads:
         }
     }
 
-    auto LuaMod::update_async() -> void
+    auto LuaMod::update_async() -> void { update_async(m_async_thread.get_stop_token()); }
+
+    auto LuaMod::update_async(std::stop_token stop) -> void
     {
-        struct ProcessingReset {bool& value;~ProcessingReset(){value=false;}} reset{m_processing_events};
         try {
-        for (m_processing_events = true; m_processing_events && !m_async_thread.get_stop_token().stop_requested();)
-        {
-            if (!Unreal::UnrealInitializer::IsInitialized()
-#ifdef UE4SS_LUA_LIFECYCLE_GATE
-                && !offline_prepare(this)
-#endif
-            )
-            {
-                m_processing_events = false;
-                break;
+            while (!stop.stop_requested()) {
+                {
+                    std::unique_lock lock(m_actions_lock);
+                    const auto pending=[&] { return !m_pending_actions.empty(); };
+                    if (m_delayed_actions.empty()) m_async_ready.wait(lock, stop, pending);
+                    else {
+                        auto deadline=std::chrono::steady_clock::time_point::max();
+                        for (const auto& action:m_delayed_actions)
+                            deadline=std::min(deadline, action.created_at+std::chrono::milliseconds(action.delay));
+                        m_async_ready.wait_until(lock, stop, deadline, pending);
+                    }
+                }
+                if (stop.stop_requested()) break;
+                process_delayed_actions();
             }
-
-            if (m_pause_events_processing)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                continue;
-            }
-
-            process_delayed_actions();
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
         } catch(...) {dispatch_error();}
     }
 

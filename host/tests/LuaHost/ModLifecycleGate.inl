@@ -1,3 +1,4 @@
+LONG WINAPI ExceptionHandler(_EXCEPTION_POINTERS*);
 // Included in LuaMod.cpp so the gate delivers through the REAL action dispatcher,
 // not a test reimplementation. CMake links the tiny EXE to the freshly built DLL.
 static std::atomic<bool> gate_scope_rejected{};
@@ -38,8 +39,9 @@ static void gate_prepare(const LuaMadeSimple::Lua& lua) {
                    "NotifyOnNewObject","LoopAsync","ExecuteInGameThreadAfterFrames"})
         lua.register_function(name,gate_enqueue);
     lua.register_function("IsInGameThread",gate_first_engine_call);
+    lua.register_function("StaticFindObject",gate_first_engine_call);
     lua.register_function("GateOnUnload",gate_on_unload);
-    lua.execute_string("prepared=true; callbacks=0; unloaded=false; function CreateInvalidObject() return {IsValid=function() return false end} end; StaticFindObject=CreateInvalidObject");
+    lua.execute_string("prepared=true; callbacks=0; unloaded=false; function CreateInvalidObject() return {IsValid=function() return false end} end");
 }
 #include "ModDispatchGate.inl"
 static UE4SSProgram* review4_program;
@@ -88,6 +90,7 @@ static void review4_deliver_dispatcher(bool tick) {
 #include "Review5DispatchTests.inl"
 #include "Review6DispatchTests.inl"
 #include "RealBindingsGate.inl"
+#include "LargeHashGate.inl"
 
 int run_lua_mod_lifecycle_gate(const wchar_t* candidate, bool expect_failure) {
     unsigned checks=0;
@@ -170,6 +173,7 @@ started=true
         round2_gates(program,scratch);
         review4_program=&program;review4_scratch=scratch;review5_set_game_thread(true);review6_set_identity_producer(true);review4_gates();review5_gates();review6_gates();
         round6_gates(program,scratch,base);
+        p76_hash_gate();
         Unreal::Hook::FScriptNameFilter filter{{1,2,3,4}};
         gate_check(filter.Accepts(3) && !filter.Accepts(99),"script filter admission changed");
         constexpr unsigned calls=1000000;
@@ -179,6 +183,30 @@ started=true
         const auto nanos=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count();
         gate_check(admitted==0,"unrelated global script call admitted owner dispatch");
         std::cout << "GLOBAL_SCRIPT_FILTER " << double(nanos)/calls << " ns/rejected call; owner/VM dispatches=" << admitted << "\n";
+        // Exercise the production exception writer without crashing a game or
+        // installing a filter. A captured current-thread context produces a real
+        // Windows minidump even after the Lua/native retirement gates drained.
+        CrashDiagnostics::initialize(scratch.c_str());
+        CrashDumper::phase("shutdown: P118 offline post-retirement dump probe");
+        CONTEXT context{};RtlCaptureContext(&context);
+        EXCEPTION_RECORD record{};record.ExceptionCode=0xe1180001;
+        record.ExceptionAddress=reinterpret_cast<void*>(&run_lua_mod_lifecycle_gate);
+        EXCEPTION_POINTERS exception{&record,&context};
+        gate_check(ExceptionHandler(&exception)==EXCEPTION_EXECUTE_HANDLER,"P118 real minidump writer failed");
+        bool dump_found=false;
+        for(const auto& file:std::filesystem::directory_iterator(scratch)) {
+            if(file.path().extension()!=L".dmp")continue;
+            std::ifstream input(file.path(),std::ios::binary);char signature[4]{};input.read(signature,4);
+            dump_found=dump_found || (file.file_size()>32 && std::string_view(signature,4)=="MDMP");
+        }
+        gate_check(dump_found,"P118 dump missing MDMP header or empty");
+        gate_check(CrashDiagnostics::trace!=INVALID_HANDLE_VALUE && FlushFileBuffers(CrashDiagnostics::trace),
+            "P118 phase trace flush failed");
+        std::ifstream trace(scratch/L"UE4SS-shutdown.log",std::ios::binary);
+        std::string trace_text((std::istreambuf_iterator<char>(trace)),{});
+        gate_check(trace_text.find("shutdown: P118 offline post-retirement dump probe")!=std::string::npos &&
+            trace_text.find("crash: dump ok=1 bytes=")!=std::string::npos,"P118 trace missing phase/dump result");
+        std::cout << "P118 real Windows post-retirement minidump and flushed phase trace PASS\n";
         std::cout << checks << " real LuaMod startup/callback/unload assertions PASS\n";
         return 0;
     } catch(const std::exception& error) {
@@ -200,3 +228,5 @@ extern "C" __declspec(dllexport) int UE4SS_RunLuaModDispatchGate(const wchar_t* 
         return 0;
     } catch(const std::exception& e) {std::cerr<<(mode>=15?"ROUND6 FAIL ":mode>=12?"ROUND5 FAIL ":mode>=9?"ROUND4 FAIL ":mode>=4?"ROUND3 FAIL ":"ROUND2 FAIL ")<<e.what()<<"\n";return 1;}
 }
+
+#include "LinkedNativeAcceptance.inl"

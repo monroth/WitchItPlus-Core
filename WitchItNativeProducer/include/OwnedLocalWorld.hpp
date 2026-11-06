@@ -1,6 +1,6 @@
 #pragma once
-// Authoritative input is the actual engine viewport Tick callback, never a Lua
-// world alias or a scan. All retained object references are genuine SDK weak refs.
+// The actual admitted local controller supplies its viewport backlink once per
+// controller/world event. All retained object references are SDK weak refs.
 #include "NativeWorldContext.hpp"
 #include <Unreal/UGameViewportClient.hpp>
 #include <Unreal/ULocalPlayer.hpp>
@@ -95,6 +95,17 @@ public:
             revoke_locked();if(exhausted_)return had_record;
             objects_=next;return had_record;
         }catch(...){if(had_record){revoke_locked();return true;}return false;}
+    }
+    // Called only for an actual local-controller admission. Reuse the complete
+    // viewport/backlink validation; never inspect the world every frame.
+    bool observe_controller(UObject* pc) noexcept {
+        using namespace RC::Unreal;
+        if(!IsInGameThreadRaw() || !usable(pc))return false;
+        try {
+            auto* player=object_field(pc,L"Player");
+            if(!usable(player) || !player->IsA<ULocalPlayer>() || object_field(player,L"PlayerController")!=pc)return false;
+            return observe(static_cast<ULocalPlayer*>(player)->GetViewportClient());
+        }catch(...){return false;}
     }
     Observation capture() noexcept {
         std::lock_guard lock(mutex_);if(!RC::Unreal::IsInGameThreadRaw())return {};return observation_locked();

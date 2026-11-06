@@ -46,7 +46,7 @@ struct LuaValueContext {
 
 // Real embedded-Lua operations, with no exports, second Lua, per-VM mutex,
 // callback resolver, token registry, UObject extraction, or reference routing.
-// The incomplete ABI tail MUST NOT advertise CAP_VALUES_V1 yet.
+// UObject operations are supplied by the installed host object backend.
 class LuaValueBackend {
     friend class LuaObjectBackend;
     Lifecycle& lifecycle_;

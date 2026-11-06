@@ -405,15 +405,16 @@ namespace RC
         // Stop queue admission, then destroy queued function managers outside
         // the queue lock and while their retained consumer code pins are alive.
         m_processing_events = false;
+        wake_event_loop();
+        if (m_event_loop.joinable()) m_event_loop.join();
+        // Explicit unload owns Lua cleanup after the event worker has stopped.
+        m_event_loop_thread_id=std::this_thread::get_id();
         {
             auto events = LuaHost::detach_events(m_queued_events, m_event_queue_mutex);
         }
         // No queue/actions/Lua/control lock is held while draining. Never force
         // lua_close/FreeLibrary while another host entry still owns the object.
-        if (m_event_loop.joinable() && m_event_loop.get_id()!=std::this_thread::get_id()) m_event_loop.join();
-        // Before first startup, this thread is the sole bootstrap control owner.
-        if (m_event_loop_thread_id==std::thread::id{}) m_event_loop_thread_id=std::this_thread::get_id();
-        if (!m_mod_controls.empty() && !is_event_loop_thread()) std::terminate();
+        LuaMod::shutdown_deferred_dispatch();
         while (!uninstall_mods()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
         while (!m_mod_controls.empty()) { drain_mod_control_retirements();std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
         auto& host = LuaHost::HostBindings::instance();
@@ -423,6 +424,7 @@ namespace RC
         // It's possible that main() will destroy the default devices (they are static)
         // However it's also possible that this program object is constructed in a context where main() is not gonna immediately exit
         // Because of that and because the default devices are created in the constructor, it's preferred to explicitly close all default devices in the destructor
+        LuaHost::HostBindings::instance().lifecycle().set_wake_callback(nullptr);
         Output::close_all_default_devices();
     }
 
@@ -896,6 +898,7 @@ namespace RC
         config.bHookAActorTick = settings_manager.Hooks.HookAActorTick;
         config.bHookEngineTick = settings_manager.Hooks.HookEngineTick;
         config.EngineTickResolveMethod = settings_manager.Hooks.EngineTickResolveMethod;
+        config.OnShutdown = [] { auto& p=get_program();p.m_processing_events=false;p.wake_event_loop(); };
         config.bHookGameViewportClientTick = settings_manager.Hooks.HookGameViewportClientTick;
         config.bHookUObjectProcessEvent = settings_manager.Hooks.HookUObjectProcessEvent;
         config.bHookProcessConsoleExec = settings_manager.Hooks.HookProcessConsoleExec;
@@ -935,17 +938,10 @@ namespace RC
             {
                 Unreal::Hook::RegisterEngineTickPostCallback(
                         [](auto&, ...) {
-                            static bool Done = false;
-                            if (!Done)
-                            {
-                                Done = true;
-                                if (Unreal::FUObjectHashTables::RunSelfTest())
-                                {
-                                    Unreal::UnrealInitializer::RetireUObjectArrayCache();
-                                }
-                            }
+                            if (Unreal::FUObjectHashTables::RunSelfTest())
+                                Unreal::UnrealInitializer::RetireUObjectArrayCache();
                         },
-                        {false, false, STR("UE4SS"), STR("HashTableSelfTest")});
+                        {true, false, STR("UE4SS"), STR("HashTableSelfTest")});
             }
             else if (Unreal::FUObjectHashTables::RunSelfTest())
             {
@@ -1143,144 +1139,108 @@ namespace RC
         }
     }
 
+#ifdef HAS_INPUT
+    // Windows delivers edges to this thread's blocking message queue. There is
+    // no GetAsyncKeyState scan, timeout, or per-frame input handler.
+    static void input_edge(unsigned key, bool pressed)
+    {
+        static std::array<bool,256> down{};
+        if (key>=down.size()) return;
+        const bool repeat=down[key];down[key]=pressed;
+        if (!pressed || repeat) return;
+        DWORD foreground{};
+        GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
+        if (foreground!=GetCurrentProcessId()) return;
+        Input::ModifierKeys modifiers{};
+        if (GetAsyncKeyState(VK_SHIFT)&0x8000) modifiers|=Input::ModifierKey::SHIFT;
+        if (GetAsyncKeyState(VK_CONTROL)&0x8000) modifiers|=Input::ModifierKey::CONTROL;
+        if (GetAsyncKeyState(VK_MENU)&0x8000) modifiers|=Input::ModifierKey::ALT;
+        UE4SSProgram::get_program().queue_input_event({static_cast<Input::Key>(key),modifiers});
+    }
+    static LRESULT CALLBACK keyboard_edge(int code, WPARAM message, LPARAM data)
+    {
+        if (code==HC_ACTION) {
+            const auto& key=*reinterpret_cast<KBDLLHOOKSTRUCT*>(data);
+            input_edge(key.vkCode, message==WM_KEYDOWN || message==WM_SYSKEYDOWN);
+        }
+        return CallNextHookEx(nullptr,code,message,data);
+    }
+    static LRESULT CALLBACK mouse_edge(int code, WPARAM message, LPARAM data)
+    {
+        if (code==HC_ACTION) {
+            switch (message) {
+            case WM_LBUTTONDOWN:case WM_LBUTTONUP:input_edge(VK_LBUTTON,message==WM_LBUTTONDOWN);break;
+            case WM_RBUTTONDOWN:case WM_RBUTTONUP:input_edge(VK_RBUTTON,message==WM_RBUTTONDOWN);break;
+            case WM_MBUTTONDOWN:case WM_MBUTTONUP:input_edge(VK_MBUTTON,message==WM_MBUTTONDOWN);break;
+            case WM_XBUTTONDOWN:case WM_XBUTTONUP:
+                input_edge(HIWORD(reinterpret_cast<MSLLHOOKSTRUCT*>(data)->mouseData)==XBUTTON1?VK_XBUTTON1:VK_XBUTTON2,message==WM_XBUTTONDOWN);break;
+            }
+        }
+        return CallNextHookEx(nullptr,code,message,data);
+    }
+#endif
+    auto UE4SSProgram::queue_input_event(Input::InputEvent event) -> void
+    {
+#ifdef HAS_INPUT
+        queue_host_event([this,event] { m_input_handler.dispatch_event(event); });
+#endif
+    }
+
     auto UE4SSProgram::update() -> void
     {
         ProfilerSetThreadName("UE4SS-UpdateThread");
         m_event_loop_thread_id = std::this_thread::get_id();
+        LuaHost::HostBindings::instance().lifecycle().set_wake_callback([] { get_program().wake_event_loop(); });
+        m_mod_controls.set_wake_callback([this] { wake_event_loop(); });
 
         on_program_start();
+#ifdef HAS_INPUT
+        m_input_thread=std::jthread([](std::stop_token stop) {
+            SetThreadDescription(GetCurrentThread(),L"UE4SS-Input");
+            MSG message{};PeekMessageW(&message,nullptr,0,0,PM_NOREMOVE);
+            const auto thread=GetCurrentThreadId();
+            std::stop_callback quit(stop,[thread] { PostThreadMessageW(thread,WM_QUIT,0,0); });
+            HMODULE module{};
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&keyboard_edge),&module);
+            const auto keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,keyboard_edge,module,0);
+            const auto mouse=SetWindowsHookExW(WH_MOUSE_LL,mouse_edge,module,0);
+            if (!keyboard || !mouse) Output::send<LogLevel::Error>(STR("Event input hook installation failed: {}\n"),GetLastError());
+            else while (GetMessageW(&message,nullptr,0,0)>0) { TranslateMessage(&message);DispatchMessageW(&message); }
+            if (keyboard) UnhookWindowsHookEx(keyboard);
+            if (mouse) UnhookWindowsHookEx(mouse);
+        });
+#endif
 
-        FilesystemWatcher filesystem_watcher{};
-        if (settings_manager.General.EnableAutoReloadingLuaMods)
-        {
-            for (const auto& mod : get_mods_snapshot())
-            {
-                if (dynamic_cast<CppMod*>(mod.get()))
-                {
-                    filesystem_watcher.add_dir(std::filesystem::path{get_mods_directory()} / mod->get_name() / "dlls");
-                }
-                else if (dynamic_cast<LuaMod*>(mod.get()))
-                {
-                    filesystem_watcher.add_dir(std::filesystem::path{get_mods_directory()} / mod->get_name() / "Scripts");
-                }
-            }
-            filesystem_watcher.start_async_polling([&](const std::filesystem::path& file, bool match_all) {
-                ScopedThreadSynchronizer thread_synchronizer{filesystem_watcher.get_thread_state()};
-                const auto mod_name = file.parent_path().filename();
-                auto dir_name = file.filename().string();
-                const auto is_cpp_mod = String::iequal(dir_name, "dlls");
-                if (is_cpp_mod)
-                {
-                    auto staged_file = file / mod_name;
-                    staged_file.replace_extension(".dll");
-                    if (!std::filesystem::exists(staged_file))
-                    {
-                        return;
-                    }
-                    // TODO: Unload the dll (uninstall).
-                    //       Delete 'main.dll'.
-                    //       Rename 'staged_file' to 'main.dll'.
-                    //       Load 'main.dll' (install & start).
 
-                    // TODO: To reload C++ mods, we need to add a way to unregister hooks, and then C++ mods need to unregister on they get notified that they're getting unloaded.
-                    //       For Lua mods, there's no notification, but we track all the hooks internally, so we can unregister automatically, we just need to
-                    //       call Lua::Uninstall, and We must also remove the keybinds like we do in UE4SSProgram::reinstall_mods.
-                    //       Unsure about loading and starting mods again.
-                }
-                else
-                {
-                    // Only the event thread may replace owned Mod objects.
-                    // Queue by name; do not retain a raw LuaMod* across reload.
-                    queue_reinstall_mod_by_name(to_string(ensure_str(mod_name)));
-                }
-            });
-        }
-
-        Output::send(STR("Event loop start\n"));
+        SetThreadDescription(GetCurrentThread(), L"UE4SS-UpdateThread");
+        Output::send(STR("Event loop start (blocking; thread {})\n"), GetCurrentThreadId());
         for (m_processing_events = true; m_processing_events;)
         {
-            if (!Unreal::UnrealInitializer::IsInitialized())
             {
-                m_processing_events = false;
-                break;
+                std::unique_lock lock(m_event_queue_mutex);
+                m_event_ready.wait(lock, [this] {
+                    return !m_processing_events || !m_queued_events.empty() || m_retirement_pending;
+                });
+                m_retirement_pending = false;
             }
-
-            if (m_pause_events_processing)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-
-            if (!is_queue_empty())
-            {
-                ProfilerScopeNamed("event processing");
-
-                static constexpr size_t max_events_executed_per_frame = 5;
-                size_t num_events_executed{};
-                auto events = LuaHost::take_event_batch(m_queued_events, m_event_queue_mutex, max_events_executed_per_frame);
-                for (auto& event : events)
-                {
-                    ++num_events_executed;
-                    event();
-                }
-            }
-
+            if (!m_processing_events || !Unreal::UnrealInitializer::IsInitialized()) break;
+            auto events = LuaHost::take_event_batch(m_queued_events, m_event_queue_mutex, 5);
+            for (auto& event : events) event();
+            events.clear(); // Release borrowers before draining controls.
             service_lua_host_retirements();
             drain_mod_control_retirements();
-
-            // Commented out because this system (turn off hotkeys when in-game console is open) it doesn't work properly.
-            /*
-            auto* player_controller = get_player_controller();
-            if (player_controller)
-            {
-                auto** player = player_controller->GetValuePtrByPropertyName<UObject*>(STR("Player"));
-                if (player && *player)
-                {
-                    auto** viewportclient = (*player)->GetValuePtrByPropertyName<UObject*>(STR("ViewportClient"));
-                    if (viewportclient && *viewportclient)
-                    {
-                        auto** console = (*viewportclient)->GetValuePtrByPropertyName<UObject*>(STR("ViewportConsole"));
-                        if (console && *console)
-                        {
-                            auto* console_state = std::bit_cast<FName*>(static_cast<uint8_t*>((*console)->GetValuePtrByPropertyNameInChain(STR("HistoryBuffer"))) + 0x70);
-                            m_input_handler.set_allow_input(console_state && *console_state == Unreal::NAME_None);
-                        }
-                    }
-                }
-            }
-            //*/
-#ifdef HAS_INPUT
-            m_input_handler.process_event();
-#endif
-            {
-                ProfilerScopeNamed("mod update processing");
-
-                for (const auto& mod : get_mods_snapshot())
-                {
-                    if (mod->is_started())
-                    {
-                        mod->fire_update();
-                    }
-                }
-            }
-
-            if (settings_manager.General.EnableAutoReloadingLuaMods)
-            {
-                // Process any mod file changes, and wait until done.
-                process_sync_request(filesystem_watcher.get_thread_state());
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            ProfilerFrameMark();
         }
         m_processing_events = false;
+#ifdef HAS_INPUT
+        m_input_thread.request_stop();
+        if (m_input_thread.joinable()) m_input_thread.join();
+#endif
         stop_render_thread();
-        { auto events=LuaHost::detach_events(m_queued_events, m_event_queue_mutex); }
-        while (!uninstall_mods()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        while (!m_mod_controls.empty()) {
-            drain_mod_control_retirements();
-            if (!m_mod_controls.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+        // Engine shutdown has already retired reflection metadata. Lua belongs
+        // to the program: explicit unload destroys it in the destructor; normal
+        // process termination reclaims it without calling engine value destructors.
+        CrashDumper::phase("shutdown: engine event producers stopped");
         Output::send(STR("Event loop end\n"));
     }
 
@@ -2412,12 +2372,41 @@ namespace RC
         m_debugging_gui.remove_tab(tab);
     }
 
+    auto UE4SSProgram::wake_event_loop() -> void
+    {
+        std::lock_guard lock(m_event_queue_mutex);
+        m_retirement_pending = true;
+        m_event_ready.notify_one();
+    }
+
     auto UE4SSProgram::queue_host_event(EventCallable callable) -> void
     {
         if (!can_process_events()) return;
         std::lock_guard<std::mutex> guard(m_event_queue_mutex);
         if (!can_process_events()) return;
         m_queued_events.emplace_back(std::move(callable));
+        m_event_ready.notify_one();
+    }
+
+    auto UE4SSProgram::make_game_thread_event(EventCallable callable, bool once) -> EventCallable
+    {
+        if (!callable || !can_process_events()) return {};
+        // Capture the consumer before crossing a worker boundary. queue_event
+        // alone cannot infer an owner from an arbitrary completion thread.
+        auto owned = LuaHost::HostBindings::instance().api().wrap_game_thread_event(
+            std::move(callable), [](EventCallable body) {
+                Unreal::Hook::RegisterEngineTickPostCallback(
+                    [body](auto&, Unreal::UEngine*, float, bool) { body(); },
+                    {true, true, STR("UE4SS"), STR("one-shot game-thread event")});
+            });
+        if (owned.status != LuaHost::Status::ok) return {};
+        auto signaled = std::make_shared<std::atomic_bool>(false);
+        return [this, event = std::move(owned.value), signaled, once]() {
+            if (once && signaled->exchange(true)) return;
+            // queue_host_event only stores the already-owned payload. Admission
+            // and root selection remain the existing host dispatcher's job.
+            queue_host_event(event);
+        };
     }
 
     auto UE4SSProgram::queue_event(EventCallable callable) -> void
@@ -2431,6 +2420,7 @@ namespace RC
         std::lock_guard<std::mutex> guard(m_event_queue_mutex);
         if (!can_process_events()) return;
         m_queued_events.emplace_back(std::move(owned.value));
+        m_event_ready.notify_one();
     }
 
     auto UE4SSProgram::queue_event(LegacyEventCallable callable, void* data) -> void

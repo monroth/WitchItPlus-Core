@@ -117,6 +117,8 @@ namespace RC::Unreal
         using LoadMapSignature = std::function<bool(UEngine*, FWorldContext& WorldContext, FURL URL, UPendingNetGame* PendingGame, FString& Error)>;
         using EngineTickSignature = std::function<void(UEngine* Context, float DeltaSeconds, bool bIdleMode)>;
         using BeginPlaySignature = std::function<void(AActor* Context)>;
+        // FStreamableHandle::CheckCompletedRequests: opaque handle, never a UObject.
+        using StreamableCheckSignature = std::function<void(void* Handle)>;
         using EndPlaySignature = std::function<void(AActor* Context, EEndPlayReason EndPlayReason)>;
         using AActorTickSignature = std::function<void(AActor* Context, float DeltaSeconds)>;
         using GameViewportClientTickSignature = std::function<void(UGameViewportClient* Context, float DeltaSeconds)>;
@@ -149,6 +151,7 @@ namespace RC::Unreal
         using LoadMapCallbackWithData = sig_to_callback_v<LoadMapSignature>;
         using EngineTickCallbackWithData = sig_to_callback_v<EngineTickSignature>;
         using BeginPlayCallbackWithData = sig_to_callback_v<BeginPlaySignature>;
+        using StreamableCheckCallbackWithData = sig_to_callback_v<StreamableCheckSignature>;
         using EndPlayCallbackWithData = sig_to_callback_v<EndPlaySignature>;
         using AActorTickCallbackWithData = sig_to_callback_v<AActorTickSignature>;
         using GameViewportClientTickCallbackWithData = sig_to_callback_v<GameViewportClientTickSignature>;
@@ -212,7 +215,9 @@ namespace RC::Unreal
         DEPRECATED_HOOK_CALLBACK auto RC_UE_API RegisterProcessEventPreCallback(ProcessEventCallback Callback) -> void;
         DEPRECATED_HOOK_CALLBACK auto RC_UE_API RegisterProcessEventPostCallback(ProcessEventCallback Callback) -> void;
         auto RC_UE_API RegisterProcessEventPreCallback(ProcessEventCallbackWithData Callback, FCallbackOptions Options) -> GlobalCallbackId;
+        auto RC_UE_API RegisterProcessEventPreCallback(ProcessEventCallbackWithData Callback, FScriptCallbackOptions Options) -> GlobalCallbackId;
         auto RC_UE_API RegisterProcessEventPostCallback(ProcessEventCallbackWithData Callback, FCallbackOptions Options) -> GlobalCallbackId;
+        auto RC_UE_API RegisterProcessEventPostCallback(ProcessEventCallbackWithData Callback, FScriptCallbackOptions Options) -> GlobalCallbackId;
 
         // Registers a callback to be called whenever 'UGameViewportClient::ProcessConsoleExec' is executed
         DEPRECATED_HOOK_CALLBACK auto RC_UE_API RegisterProcessConsoleExecCallback(ProcessConsoleExecCallback Callback) -> void;
@@ -263,6 +268,10 @@ namespace RC::Unreal
         auto RC_UE_API RegisterBeginPlayPostCallback(BeginPlayCallbackWithData Callback, FCallbackOptions Options) -> GlobalCallbackId;
 
         // Registers a callback to be called whenever 'EndPlay' is called
+        // The caller supplies a uniquely signature-resolved address before the
+        // first subscription. Dispatch, code pins, cancellation and teardown use
+        // the existing native callback owner bridge, never a DLL-owned detour.
+        auto RC_UE_API RegisterStreamableCheckPostCallback(void* Address, StreamableCheckCallbackWithData Callback, FCallbackOptions Options) -> GlobalCallbackId;
         DEPRECATED_HOOK_CALLBACK auto RC_UE_API RegisterEndPlayPreCallback(EndPlayCallback Callback) -> void;
         DEPRECATED_HOOK_CALLBACK auto RC_UE_API RegisterEndPlayPostCallback(EndPlayCallback Callback) -> void;
         auto RC_UE_API RegisterEndPlayPreCallback(EndPlayCallbackWithData Callback, FCallbackOptions Options) -> GlobalCallbackId;

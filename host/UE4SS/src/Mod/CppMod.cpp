@@ -7,6 +7,7 @@
 #include <Helpers/SysError.hpp>
 #include <Helpers/String.hpp>
 #include <Mod/CppMod.hpp>
+#include <CrashDumper.hpp>
 #include <LuaHost/HostBindings.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 
@@ -146,6 +147,7 @@ namespace RC
         } running{m_host_uninstall_running};
         bool cleaned{};
         host.api().dispatch_finalizer(m_host_module, [&] {
+            if (auto* mod = m_mod.load(std::memory_order_acquire); mod && !mod->prepare_uninstall()) return;
             if (host.cleanup_module(m_host_module) != LuaHost::Status::ok) return;
             cleaned = true;
             Output::send(STR("Stopping C++ mod '{}' for uninstall\n"), m_mod_name);
@@ -155,6 +157,7 @@ namespace RC
                 m_host_uninstall_called = true;
                 try
                 {
+                    CrashDumper::phase("shutdown: native producer destructor (workers and hooks)");
                     if (auto* mod = m_mod.load(std::memory_order_acquire); mod && m_uninstall_mod_func)
                         m_uninstall_mod_func(mod);
                     m_mod.store(nullptr, std::memory_order_release);
@@ -171,6 +174,7 @@ namespace RC
             if (!cleaned || m_host_uninstall_failed) return;
             if (m_main_dll_module)
             {
+                CrashDumper::phase("shutdown: native DLL FreeLibrary (destructor complete)");
                 if (!FreeLibrary(m_main_dll_module))
                 {
                     m_host_uninstall_failed = true;
@@ -273,6 +277,11 @@ namespace RC
             }
             mod.on_lua_stop(lua, main_lua, async_lua, hook_luas);
         });
+    }
+
+    auto CppMod::fire_on_lua_stop_drain(StringViewType name) -> void
+    {
+        run_code([&](CppUserModBase& mod) { mod.on_lua_stop_drain(name); });
     }
 
     auto CppMod::fire_unreal_init() -> void

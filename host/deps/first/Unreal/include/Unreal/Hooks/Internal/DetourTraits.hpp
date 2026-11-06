@@ -53,6 +53,14 @@ namespace RC::Unreal::Hook::Internal
     };
 
     template<>
+    struct TDetourTraits<EDetourTarget::StreamableCheck>
+    {
+        using Signature = StreamableCheckSignature;
+        using Base = TDetourInstance<EDetourTarget::StreamableCheck, Signature>;
+        using Impl = Base;
+    };
+
+    template<>
     struct TDetourTraits<EDetourTarget::EndPlay> 
     {
         using Signature = EndPlaySignature;

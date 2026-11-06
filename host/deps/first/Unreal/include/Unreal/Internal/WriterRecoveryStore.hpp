@@ -11,8 +11,9 @@
 
 namespace RC::Unreal::Internal {
 // One append-only, SDK-owned intent log. Existing missing/foreign/partial storage is
-// UNAVAILABLE. Only an absent namespace may be provisioned; existing evidence
-// is never reset, replaced or migrated. No arbitrary map-folder discovery.
+// UNAVAILABLE. Only an absent namespace may be provisioned; a complete,
+// identity-pinned initial header may finish its interrupted publication. Existing
+// evidence is never reset, replaced or migrated. No arbitrary map-folder discovery.
 class WriterRecoveryStore final {
     struct Handle {
         HANDLE value{INVALID_HANDLE_VALUE};
@@ -66,6 +67,33 @@ class WriterRecoveryStore final {
         auto n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,s.data(),int(s.size()),nullptr,0,nullptr,nullptr);
         if(n<=0 || n>32768)throw std::runtime_error("recovery path encoding refused");std::string v(n,'\0');
         if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,s.data(),int(s.size()),v.data(),n,nullptr,nullptr)!=n)throw std::runtime_error("recovery path encoding refused");return v;
+    }
+    static std::runtime_error io_error(const char* operation,const std::wstring& from,const std::wstring& to={}) {
+        const auto code=GetLastError(); // Preserve before path conversion/cleanup changes it.
+        return std::runtime_error(std::string(operation)+" Win32="+std::to_string(code)+" path="+utf8(from)+(to.empty()?"":" target="+utf8(to)));
+    }
+    BY_HANDLE_FILE_INFORMATION publish_header(bool create) {
+        const auto stagePath=root_+L"\\ledger.wir.new";Handle stage;
+        // Keep the validated incarnation open through rename. Share delete is
+        // needed for our rename, but another writer cannot change its bytes.
+        stage.value=CreateFileW(stagePath.c_str(),create?GENERIC_READ|GENERIC_WRITE:GENERIC_READ,
+            FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,create?CREATE_NEW:OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(stage.value==INVALID_HANDLE_VALUE)throw io_error("recovery header open refused",stagePath);
+        if(create){
+            DWORD wrote{};
+            if(!WriteFile(stage.value,Magic,sizeof(Magic),&wrote,nullptr) || wrote!=sizeof(Magic) || !FlushFileBuffers(stage.value))
+                throw io_error("recovery header flush refused",stagePath);
+        }
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(!GetFileInformationByHandle(stage.value,&info))throw io_error("recovery header identity unavailable",stagePath);
+        if(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT) || info.nNumberOfLinks!=1
+            || read(stage.value,sizeof(Magic))!=std::vector<std::uint8_t>(Magic,Magic+sizeof(Magic)))
+            throw std::runtime_error("foreign/partial recovery header path="+utf8(stagePath));
+        // No REPLACE_EXISTING: a competing destination is never overwritten.
+        if(!MoveFileExW(stagePath.c_str(),logPath_.c_str(),MOVEFILE_WRITE_THROUGH))
+            throw io_error("recovery ledger publication refused",stagePath,logPath_);
+        return info;
     }
     void replay(const std::vector<std::uint8_t>& bytes) {
         if(bytes.size()<8 || std::memcmp(bytes.data(),Magic,8)!=0)throw std::runtime_error("foreign recovery root");
@@ -124,24 +152,21 @@ public:
                 provision=true;attributes=GetFileAttributesW(root_.c_str());
             }
             if(attributes==INVALID_FILE_ATTRIBUTES || !(attributes&FILE_ATTRIBUTE_DIRECTORY) || attributes&FILE_ATTRIBUTE_REPARSE_POINT)throw std::runtime_error("foreign/reparse recovery root");
-            directory_.value=CreateFileW(root_.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+            directory_.value=CreateFileW(root_.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
             BY_HANDLE_FILE_INFORMATION directory_info{};
             if(directory_.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(directory_.value,&directory_info)
                 || !(directory_info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) || directory_info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)throw std::runtime_error("recovery namespace pin refused");
-            if(provision){
-                const auto stagePath=root_+L"\\ledger.wir.new";Handle stage;
-                stage.value=CreateFileW(stagePath.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-                if(stage.value==INVALID_HANDLE_VALUE)throw std::runtime_error("recovery ledger creation refused");
-                DWORD wrote{};
-                if(!WriteFile(stage.value,Magic,sizeof(Magic),&wrote,nullptr) || wrote!=sizeof(Magic) || !FlushFileBuffers(stage.value))throw std::runtime_error("recovery header flush refused");
-                stage.reset();
-                // Atomic namespace publication, WITHOUT MOVEFILE_REPLACE_EXISTING.
-                // A failed publish retains the staging evidence for inspection.
-                if(!MoveFileExW(stagePath.c_str(),logPath_.c_str(),MOVEFILE_WRITE_THROUGH))throw std::runtime_error("recovery ledger publication refused");
+            // Sharing directory writes allows child rename on Windows; withholding
+            // FILE_SHARE_DELETE still pins the namespace against replacement.
+            BY_HANDLE_FILE_INFORMATION published_info{};bool published=false;
+            if(provision || (absent(logPath_) && !absent(root_+L"\\ledger.wir.new"))){
+                published_info=publish_header(provision);published=true;
             }
             log_.value=CreateFileW(logPath_.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
             BY_HANDLE_FILE_INFORMATION info{};
-            if(log_.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(log_.value,&info) || info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT || info.nNumberOfLinks!=1)throw std::runtime_error("recovery log ownership unavailable");
+            if(log_.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(log_.value,&info) || info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT || info.nNumberOfLinks!=1)throw io_error("recovery log ownership unavailable",logPath_);
+            if(published && (info.dwVolumeSerialNumber!=published_info.dwVolumeSerialNumber || info.nFileIndexHigh!=published_info.nFileIndexHigh
+                || info.nFileIndexLow!=published_info.nFileIndexLow))throw std::runtime_error("published recovery header identity changed path="+utf8(logPath_));
             auto bytes=read(log_.value,MaxLog);replay(bytes);size_=bytes.size();
             LARGE_INTEGER stamp{};if(!QueryPerformanceCounter(&stamp) || stamp.QuadPart<=0)throw std::runtime_error("recovery session stamp unavailable");
             session_=std::to_string(GetCurrentProcessId())+"-"+std::to_string(stamp.QuadPart);

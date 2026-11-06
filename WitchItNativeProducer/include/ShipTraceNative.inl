@@ -41,7 +41,7 @@ private:
   }return out;
  }
  TraceInputs trace_inputs(const Context& c) const {
-  using namespace RC::Unreal;require(current(c));TraceInputs in;
+  using namespace RC::Unreal;require(c.lane=="authoring" && current(c));TraceInputs in;
   in.pc=pin(static_cast<UObject*>(c.observation.local_anchor));
   require(in.pc.weak.ObjectIndex==c.observation.anchor_index && in.pc.weak.ObjectSerialNumber==c.observation.anchor_serial);
   require(path(type(in.pc))=="/Game/Blueprints/Gamemodes/CreativeMode/B_CreativePlayerController.B_CreativePlayerController_C"

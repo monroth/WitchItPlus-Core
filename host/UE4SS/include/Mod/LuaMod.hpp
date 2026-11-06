@@ -1,4 +1,5 @@
 #pragma once
+#include <condition_variable>
 
 #include <LuaHost/Lifecycle.hpp>
 
@@ -194,6 +195,7 @@ namespace RC
         bool m_is_process_event_hooked{};
         static inline bool m_is_engine_tick_hooked{};
         std::mutex m_actions_lock{};
+        std::condition_variable_any m_async_ready;
         int32_t m_on_unload_lua_function_ref{LUA_NOREF};
 
       public:
@@ -203,10 +205,11 @@ namespace RC
       private:
         auto start_async_thread() -> void
         {
-            m_async_thread = std::jthread{&Mod::update_async, this};
+            m_async_thread = std::jthread{[this](std::stop_token stop) { update_async(stop); }};
         }
 
       private:
+        auto update_async(std::stop_token) -> void;
         static auto ensure_engine_tick_hooked() -> void;
         static auto ensure_process_event_hooked(LuaMod* mod) -> void;
 
@@ -244,6 +247,7 @@ namespace RC
         RC_UE4SS_API auto actions_unlock() -> void
         {
             m_actions_lock.unlock();
+            m_async_ready.notify_one();
         }
 
         [[nodiscard]] RC_UE4SS_API auto get_async_thread_id() const -> std::thread::id
@@ -261,6 +265,7 @@ namespace RC
         auto static on_program_start() -> void;
 
         auto static global_uninstall() -> bool;
+        static void shutdown_deferred_dispatch();
 
         // Async update
         // Used when the main update function would block other mods from executing their scripts

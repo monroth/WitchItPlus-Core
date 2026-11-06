@@ -132,6 +132,7 @@ namespace RC::Unreal
     {
         UnrealInitializer::IsInitialized() = false;
         UnrealInitializer::StaticStorage::bIsInitialized = false;
+        if (auto notify=UnrealInitializer::StaticStorage::GlobalConfig.OnShutdown) notify();
         UObjectArray::RemoveUObjectDeleteListener(this);
     }
 

@@ -71,7 +71,7 @@ std::uint32_t register_function(const LuaMadeSimple::Lua& lua,
 }
 std::uint32_t dispatch_host_function(const LuaMadeSimple::Lua& lua,int (*function)(const LuaMadeSimple::Lua&),int* output) {
     if(!function || !output || code_image(reinterpret_cast<const void*>(function))!=host_code_image()) return UE4SS_LUA_HOST_WRONG_OWNER;
-    try {
+    {
         auto& host=HostBindings::instance();
         const auto vm=host.find_vm(lua.get_root_lua_state());
         if(vm.status!=Status::ok) return static_cast<std::uint32_t>(vm.status);
@@ -79,7 +79,7 @@ std::uint32_t dispatch_host_function(const LuaMadeSimple::Lua& lua,int (*functio
         Request request{&lua,function,output};
         return static_cast<std::uint32_t>(host.dispatch_host_callback_lua_on_stack(vm.value,lua.get_lua_state(),&request,
             +[](void* opaque){auto* r=static_cast<Request*>(opaque);*r->output=r->function(*r->lua);}));
-    } catch (...) {return UE4SS_LUA_HOST_INTERNAL_ERROR;}
+    }
 }
 std::uint32_t dispatch_function(std::uint64_t ticket, const LuaMadeSimple::Lua& lua, int* output) {
     if (!output) return UE4SS_LUA_HOST_INVALID_HANDLE;

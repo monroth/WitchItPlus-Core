@@ -202,6 +202,15 @@ if(WIN32 AND UE4SS_BUILD_LUA_LIFECYCLE_GATE)
     endif()
     add_executable(UE4SSLuaLifecycleGate "../tests/LuaHost/ModLifecycleGateMain.cpp" "../tests/LuaHost/SerialAllocationGate.cpp")
     target_link_libraries(UE4SSLuaLifecycleGate PRIVATE UE4SS)
+    add_executable(Native4LinkedGate "../tests/LuaHost/LinkedNativeGateMain.cpp")
+    target_link_libraries(Native4LinkedGate PRIVATE UE4SS)
+    add_library(Native4Counted MODULE "../tests/LuaHost/CountedNativeFixture.cpp")
+    target_link_libraries(Native4Counted PRIVATE UE4SS)
+    target_compile_features(Native4Counted PRIVATE cxx_std_23)
+    set_target_properties(Native4LinkedGate Native4Counted PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:UE4SS>"
+        LIBRARY_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:UE4SS>")
+
     set_target_properties(UE4SSLuaLifecycleGate PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:UE4SS>")
 endif()

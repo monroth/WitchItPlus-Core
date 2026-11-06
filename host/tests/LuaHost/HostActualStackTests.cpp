@@ -10,6 +10,7 @@ extern "C" int uikit_lua_entry_matches_root(lua_State*,lua_State*);
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 using namespace RC::LuaHost;
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { std::cerr << "FAIL " << __LINE__ << ": " << #x << '\n'; std::abort(); } } while (false)
@@ -29,6 +30,7 @@ struct Fixture {
     std::function<void(ue4ss_lua_context_handle)> body;
     Fixture() {
         CHECK(root && foreign);
+        luaL_openlibs(root);
         CHECK(life.publish_vm(vm) == Status::ok);
         raw_vms.emplace(root,this);
         CHECK(life.publish_module(module) == Status::ok);
@@ -216,7 +218,30 @@ int main() {
         CHECK(api.register_callback(closure_throws,&closure)==UE4SS_LUA_HOST_OK);
         CHECK(api.callback_push(context,closure,0)==UE4SS_LUA_HOST_OK);
         CHECK(api.protected_call(context,0,1)==UE4SS_LUA_HOST_INTERNAL_ERROR);
-        CHECK(api.stack_top(context,&top)==UE4SS_LUA_HOST_OK && top==1);
+        CHECK(api.stack_top(context,&top)==UE4SS_LUA_HOST_OK && top==2);
+        CHECK(api.value_read(context,-1,&v)==UE4SS_LUA_HOST_OK && v.kind==UE4SS_LUA_VALUE_STRING);
+        CHECK(std::string_view(v.string_data,v.string_size).find("stack traceback:")!=std::string_view::npos);
+        CHECK(api.stack_set_top(context,1)==UE4SS_LUA_HOST_OK);
+        CHECK(luaL_loadstring(fixture.thread,"local hits=0; return function() hits=hits+1; if hits==1 then error('NATIVE7 callback detail') end; return true end")==LUA_OK);
+        CHECK(lua_pcall(fixture.thread,0,1,0)==LUA_OK);
+        CHECK(api.reference_create(context,-1,&reference)==UE4SS_LUA_HOST_OK);
+        CHECK(api.stack_set_top(context,1)==UE4SS_LUA_HOST_OK);
+        for(int attempt=0;attempt<2;++attempt){
+            CHECK(api.reference_push(context,reference)==UE4SS_LUA_HOST_OK);
+            CHECK(api.protected_call(context,0,1)==(attempt?UE4SS_LUA_HOST_OK:UE4SS_LUA_HOST_INTERNAL_ERROR));
+            CHECK(api.stack_top(context,&top)==UE4SS_LUA_HOST_OK && top==2);
+            CHECK(api.value_read(context,-1,&v)==UE4SS_LUA_HOST_OK);
+            if(attempt)CHECK(v.kind==UE4SS_LUA_VALUE_BOOLEAN && v.boolean_value);
+            else {CHECK(v.kind==UE4SS_LUA_VALUE_STRING);auto message=std::string_view(v.string_data,v.string_size);
+                CHECK(message.find("NATIVE7 callback detail")!=std::string_view::npos && message.find("stack traceback:")!=std::string_view::npos);}
+            CHECK(api.stack_set_top(context,1)==UE4SS_LUA_HOST_OK);
+        }
+        CHECK(api.reference_release(context,reference)==UE4SS_LUA_HOST_OK);
+        CHECK(luaL_loadstring(fixture.thread,"error(12345)")==LUA_OK);
+        CHECK(api.protected_call(context,0,0)==UE4SS_LUA_HOST_INTERNAL_ERROR);
+        CHECK(api.value_read(context,-1,&v)==UE4SS_LUA_HOST_OK && v.kind==UE4SS_LUA_VALUE_STRING);
+        CHECK(std::string_view(v.string_data,v.string_size).find("12345")!=std::string_view::npos);
+        CHECK(api.stack_set_top(context,1)==UE4SS_LUA_HOST_OK);
         CHECK(api.request_module_retire() == UE4SS_LUA_HOST_PENDING);
         CHECK(api.stack_top(context, &top) == UE4SS_LUA_HOST_RETIRED);
     };
