@@ -35,9 +35,7 @@ rolls back. How the game exits is not considered.
 Only signed explicit file removals are applied. No directory removals; no
 private packages, user maps, save data, INI replacement, storage/presets,
 settings or registration replacement. Seeds create missing files only; existing
-mods.txt/mods.json and enable choices are retained. Enabled public features
-update as one ABI-compatible set; a Core release must have newer matching
-feature releases for every enabled public feature. The runtime publishes
+mods.txt/mods.json and enable choices are retained. Each package updates on its own; a feature names the oldest Core it works with. The runtime publishes
 `enabled_packages` in `ue4ss/witchit-update-settings.json` before the menu check
 and when package switches change. Disabled or absent packages cause no catalog,
 manifest or payload fetch and cannot activate a previously staged update. Older

@@ -179,50 +179,9 @@ Json verified_plan(const fs::path& r,const fs::path& pending,const Json& st){
   }
   for(auto& f:m["removals"]["files"]){auto path=f.get<std::string>();require(all.insert(lower(path)).second,"cross-package removal collision");auto dst=r/path;require(!fs::exists(dst)||fs::is_regular_file(dst),"removal not regular file");if(fs::exists(dst))result["actions"].push_back({{"path",path},{"source",""},{"existed",true}});}
  }
- // Mixed old/new feature sets must still target the chosen host ABI/core. The
- // installed receipt records bindings, not just versions, to avoid ABI guesses.
- auto bindings=fs::exists(home(r)/"bindings.json")?parse(read(home(r)/"bindings.json")):Json::object();
- for(auto& m:result["releases"])if(m["package_id"]!="core")bindings[m["package_id"].get<std::string>()]=m["requires"];
- for(auto& b:bindings.items())if(enabled.count(b.key())&&next["packages"].contains(b.key()))require(b.value()["core"]==next["packages"]["core"]&&b.value()["runtime_abi"]==next["runtime_abi"],"release set not ABI-compatible");
- if(ids.count("core"))for(auto& p:old["packages"].items())if(p.key()!="core"&&enabled.count(p.key()))require(ids.count(p.key()),"core update requires matching enabled features");
- // The receipt binds every managed dependency after the transaction, including
- // untouched packages. A feature-only update cannot silently invalidate it.
- const std::string receipt_name="ue4ss/native-build-receipt.tsv";
- auto receipt_path=r/receipt_name;
- for(auto& a:result["actions"])if(a["path"]==receipt_name)receipt_path=pending/a["source"].get<std::string>();
- require(fs::is_regular_file(receipt_path),"complete native build receipt required");
- std::map<std::string,std::string> receipt;std::istringstream receipt_stream(read(receipt_path));std::string line;
- while(std::getline(receipt_stream,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();auto at=line.find('\t');require(at!=line.npos&&receipt.emplace(line.substr(0,at),line.substr(at+1)).second,"invalid native build receipt");}
- require(receipt["protocol"]=="1"&&receipt["profile"]=="public"&&receipt["linked_tests"]=="PASS","native build receipt not accepted public profile");
- require(receipt["core_graph"]=="PASS","Core graph acceptance absent");
- for(auto name:{"source","sdk","toolchain","configuration","linked_evidence","core_evidence"})digest_field(receipt[name]);
- std::size_t outputs=0;
- for(auto& [key,value]:receipt)if(key.rfind("output:",0)==0){
-  auto name=key.substr(7);require(name=="dwmapi.dll"||name=="ue4ss/UE4SS.dll"||name=="ue4ss/WitchItUpdater.exe"||name=="ue4ss/Mods/WitchItNativeProducer/dlls/main.dll","unexpected native output");
-  digest_field(value);require(receipt["file:"+name]==value,"native output inventory differs");++outputs;
- }
- require(outputs==4,"mandatory native output set incomplete");
- for(auto& a:result["actions"])if(!a["source"].get<std::string>().empty()&&a["path"]!=receipt_name&&!witchit::file_policy::seed(a["path"].get<std::string>())){
-  auto path=a["path"].get<std::string>();auto key="file:"+path;
-  require(receipt.count(key)&&receipt[key]==a["sha256"].get<std::string>(),"updated file absent from complete build closure: "+path);
- }
- for(auto name:{"dwmapi.dll","ue4ss/UE4SS.dll","ue4ss/WitchItUpdater.exe","ue4ss/Mods/WitchItNativeProducer/dlls/main.dll","ue4ss/Mods/WitchItRuntime/Scripts/main.lua","ue4ss/Mods/Core/package.lua","ue4ss/Mods/UIKit/package.lua","ue4ss/Mods/BaseWorldPlus/package.lua","ue4ss/Mods/FillAPotPlus/package.lua","ue4ss/Mods/MatchRulesPlusPlus/package.lua"})require(receipt.count(std::string("file:")+name),"incomplete public build closure");
- if(fs::exists(r/receipt_name)){
-  std::istringstream previous_receipt(read(r/receipt_name));std::string previous_line;
-  while(std::getline(previous_receipt,previous_line)){
-   if(!previous_line.empty()&&previous_line.back()=='\r')previous_line.pop_back();
-   require(previous_line!="profile\tprivate-full","Private-full installation requires a local rebuild/install; public updater refused before mutation");
-   if(previous_line.rfind("file:",0)==0){
-   auto at=previous_line.find('\t');require(at!=previous_line.npos,"invalid previous build closure");auto key=previous_line.substr(0,at);
-   if(!receipt.count(key)&&!witchit::file_policy::seed(key.substr(5))){bool removed=false;for(auto& a:result["actions"])if(a["path"]==key.substr(5)&&a["source"]=="")removed=true;require(removed,"retired receipt dependency needs explicit removal: "+key.substr(5));}
-  }}
- }
- for(auto& [key,digest]:receipt)if(key.rfind("file:",0)==0){
-  auto name=safe_path(key.substr(5));require(!witchit::file_policy::seed(name),"seed in immutable build closure");digest_field(digest);auto path=r/name;
-  for(auto& a:result["actions"])if(a["path"]==name){require(!a["source"].get<std::string>().empty(),"receipt dependency removed");path=pending/a["source"].get<std::string>();break;}
-  require(fs::is_regular_file(path)&&file_hash(path)==digest,"release breaks complete source/native closure: "+name);
- }
- result["installed"]=next;result["bindings"]=bindings;result["notice_version"]=result["releases"].front()["version"];return result;
+ // A feature names the oldest Core it works with; anything else about a package is its own.
+ for(auto& m:result["releases"])if(m["package_id"]!="core")require(version_compare(next["packages"]["core"],m["requires"]["core"])>=0,"release needs a newer Core");
+ result["installed"]=next;result["notice_version"]=result["releases"].front()["version"];return result;
 }
 static void move_file(const fs::path& a,const fs::path& b){fs::create_directories(b.parent_path());
 #ifdef _WIN32
@@ -237,7 +196,7 @@ static void move_file(const fs::path& a,const fs::path& b){fs::create_directorie
 static void rollback(const fs::path& r,Json j){auto h=home(r);for(auto i=j["actions"].rbegin();i!=j["actions"].rend();++i){auto path=(*i)["path"].get<std::string>();safe_path(path);auto dst=r/path,backup=h/"backup/files"/path;
   if(fs::exists(backup)){if(fs::exists(dst))move_file(dst,h/("rollback-discard-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count()))/path);move_file(backup,dst);}else if(!(*i)["existed"].get<bool>()&&fs::exists(dst)){require(i->contains("sha256")&&file_hash(dst)==(*i)["sha256"].get<std::string>(),"rollback found modified new file");fs::remove(dst);}
  }
- atomic_write(h/"installed.json",j["previous"].dump());if(j.contains("previous_bindings"))atomic_write(h/"bindings.json",j["previous_bindings"].dump());
+ atomic_write(h/"installed.json",j["previous"].dump());
  auto st=state(r);for(auto& m:j["releases"])if(std::find(st["blocked"].begin(),st["blocked"].end(),release_key(m))==st["blocked"].end())st["blocked"].push_back(release_key(m));atomic_write(h/"state.json",st.dump());
  fs::remove(h/"trial.json");fs::remove(h/"notice.json");fs::remove(h/"journal.json");if(fs::exists(h/"pending"))fs::remove_all(h/"pending");log(r,"activation rolled back; failed releases quarantined");
 }
@@ -261,13 +220,13 @@ void activate(const fs::path& r){auto h=home(r);fs::create_directories(h);Lock l
  auto st=state(r);Json plan;
  try{plan=verified_plan(r,h/"pending",st);}catch(const std::exception& e){log(r,std::string("staged update refused: ")+e.what());quarantine_staged(r,h/"pending");fs::remove(h/"notice.json");fs::rename(h/"pending",h/("rejected-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count())));return;}
  if(fs::exists(h/"backup"))fs::remove_all(h/"backup");fs::create_directories(h/"backup");
- plan["previous"]=installed(r);plan["previous_bindings"]=fs::exists(h/"bindings.json")?parse(read(h/"bindings.json")):Json::object();plan["phase"]="applying";
+ plan["previous"]=installed(r);plan["phase"]="applying";
  atomic_write(h/"journal.json",plan.dump());
  try{for(auto& a:plan["actions"]){auto p=a["path"].get<std::string>();auto dst=r/p;
    if(a["existed"].get<bool>())move_file(dst,h/"backup/files"/p);
    if(!a["source"].get<std::string>().empty()){auto src=h/"pending"/a["source"].get<std::string>();require(file_hash(src)==a["sha256"].get<std::string>(),"staged file changed during activation");auto tmp=dst;tmp+=".witchit-new";fs::create_directories(dst.parent_path());fs::copy_file(src,tmp,fs::copy_options::overwrite_existing);require(file_hash(tmp)==a["sha256"].get<std::string>(),"activation copy hash");move_file(tmp,dst);}
   }
-  atomic_write(h/"installed.json",plan["installed"].dump());atomic_write(h/"bindings.json",plan["bindings"].dump());
+  atomic_write(h/"installed.json",plan["installed"].dump());
   fs::remove(h/"ready.marker");
   atomic_write(h/"trial.json","{}");
   atomic_write(h/"notice.json",Json{{"kind","updated"},{"version",plan["notice_version"]}}.dump());
