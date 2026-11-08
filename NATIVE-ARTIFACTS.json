@@ -2,7 +2,7 @@
   "natives": [
     "560cb4ae3319ef3426c4fdbca39490bcd3e405e581fb76fec966de3919e4a723  dwmapi.dll",
     "312a1e20a00d5030b2e8a77281a705457541377708567f0f4036683a466cc37f  UE4SS.dll",
-    "1d6b88144bd0cdcc1db2b3e35e06957b1a92b87e1415af9189997c9cc5ff759c  WitchItNativeProducer.dll",
+    "c6342d42ffaff2b7d810f6bc7e0d462785fa089bd05e89b603cb101c7d9e18c6  WitchItNativeProducer.dll",
     "f0731ef8d2bdb522def38006753e68e976694c3c01494d08b4f36f20297da560  WitchItUpdater.exe",
     ""
   ]

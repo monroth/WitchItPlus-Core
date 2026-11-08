@@ -29,11 +29,24 @@ void source_unhook()noexcept {
 bool source_owned(UObject* actor)const {
  auto i=source_owned_.find(actor);return i!=source_owned_.end() && usable(i->second);
 }
-void source_filter(RC::Unreal::FArrayProperty* p,void* data) {
+// An actor attached, at any depth, to rebuilt scenery is rebuilt too: a bookshelf's book
+// switch is a child actor the engine creates and may recreate for its component.
+bool source_rebuilt(UObject* actor) {
+ for(int depth=0;actor&&depth<8;++depth) {
+  if(source_owned(actor)||source_positions_.contains(actor))return true;
+  auto* root=object(actor,L"RootComponent");if(!root)return false;
+  auto* parent=object(root,L"AttachParent");if(!parent)return false;
+  actor=parent->GetOuterPrivate();
+ }
+ return false;
+}
+void source_filter(RC::Unreal::FArrayProperty* p,void* data,const wchar_t* saving=nullptr) {
  using namespace RC::Unreal;
  require(p&&CastField<FObjectProperty>(p->GetInner())&&p->GetInner()->GetSize()==sizeof(UObject*)&&p->GetSize()==sizeof(TArray<UObject*>),"source edit/save actor array differs");
  auto& actors=*static_cast<TArray<UObject*>*>(data);
- for(int i=actors.Num()-1;i>=0;--i)if(source_owned(actors[i]))actors.RemoveAt(i);
+ const int total=actors.Num();
+ for(int i=total-1;i>=0;--i)if(saving?source_rebuilt(actors[i]):source_owned(actors[i]))actors.RemoveAt(i);
+ if(saving)RC::Output::send(STR("[WIR] SourceGeometry: save left out {} of {} {}\n"),total-actors.Num(),total,saving);
 }
 void source_install_hooks() {
  using namespace RC::Unreal;if(source_query_installed_)return;
@@ -44,9 +57,14 @@ void source_install_hooks() {
   try {
    auto* fn=frame.Node();auto path=fn->GetPathName();
    const auto prefix=L"/Game/Blueprints/Gamemodes/CreativeMode/B_CreativePlayerController.B_CreativePlayerController_C:";
-   if(path==L"/Game/Blueprints/Match/BFL_MapLayoutLoading.BFL_MapLayoutLoading_C:StoreStatics") {
-    auto* p=CastField<FArrayProperty>(field(fn,L"Statics",fn->GetStructureSize()));
-    auto* data=FindOutParamValueAddress(frame,p);if(!data)data=p->ContainerPtrToValuePtr<void>(frame.Locals());source_filter(p,data);return;
+   // Every list the layout save stores: props, blocks, lights and switches.
+   const auto library=std::wstring_view{L"/Game/Blueprints/Match/BFL_MapLayoutLoading.BFL_MapLayoutLoading_C:"};
+   if(path.starts_with(library)) {
+    const auto name=fn->GetName();
+    const wchar_t* list=name==L"StoreStatics"?L"Statics":name==L"StoreSwitches"?L"Switches":name==L"StoreLights"?L"Lights":name==L"StoreProps"?L"Props":nullptr;
+    if(!list)return;
+    auto* p=CastField<FArrayProperty>(field(fn,list,fn->GetStructureSize()));
+    auto* data=FindOutParamValueAddress(frame,p);if(!data)data=p->ContainerPtrToValuePtr<void>(frame.Locals());source_filter(p,data,list);return;
    }
    if(!path.starts_with(prefix))return;
    auto name=fn->GetName();
@@ -59,7 +77,7 @@ void source_install_hooks() {
   }catch(const std::exception& e){RC::Output::send(STR("[WIR] SourceGeometry: edit/save filtering failed: {}\n"),widen(e.what()));}
  };
  Hook::FScriptNameFilter filter;
- for(auto name:{L"SelectActor",L"SelectActorSever",L"SelectMultiple",L"DeleteMultiple",L"DeleteMultipleServer",L"StoreStatics"})filter.ComparisonIndices.push_back(static_cast<std::int32_t>(FName(name,FNAME_Add).GetComparisonIndex().ToUnstableInt()));
+ for(auto name:{L"SelectActor",L"SelectActorSever",L"SelectMultiple",L"DeleteMultiple",L"DeleteMultipleServer",L"StoreStatics",L"StoreSwitches",L"StoreLights",L"StoreProps"})filter.ComparisonIndices.push_back(static_cast<std::int32_t>(FName(name,FNAME_Add).GetComparisonIndex().ToUnstableInt()));
  source_hooks_.push_back(Hook::RegisterProcessLocalScriptFunctionPreCallback(edit,{false,false,STR("WitchItNativeProducer"),STR("source scenery is not editable/saveable"),filter}));
  source_hooks_.push_back(Hook::RegisterProcessInternalPreCallback(edit,{false,false,STR("WitchItNativeProducer"),STR("source scenery is not editable/saveable"),filter}));
  auto post=[this](UnrealScriptFunctionCallableContext& c,void*) {
